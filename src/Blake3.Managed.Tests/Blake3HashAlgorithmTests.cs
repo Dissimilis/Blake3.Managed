@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace Blake3.Managed.Tests;
 
-public class Blake3HashAlgorithmTests : Blake3TestsBase
+public class Blake3HashAlgorithmTests
 {
     [Fact]
     public void TestComputeHash()
@@ -11,7 +11,7 @@ public class Blake3HashAlgorithmTests : Blake3TestsBase
         using var hashAlgorithm = new Blake3HashAlgorithm();
         var result = hashAlgorithm.ComputeHash(HasherTests.BigData);
         var hash = Hash.FromBytes(result);
-        AssertTextAreEqual(HasherTests.BigExpected, hash.ToString());
+        Assert.Equal(HasherTests.BigExpected, hash.ToString());
     }
 
     [Fact]
@@ -37,11 +37,11 @@ public class Blake3HashAlgorithmTests : Blake3TestsBase
         hashAlgorithm.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
 
         var hash1 = Hash.FromBytes(hashAlgorithm.Hash);
-        AssertTextAreEqual(HasherTests.BigExpected, hash1.ToString());
+        Assert.Equal(HasherTests.BigExpected, hash1.ToString());
 
         hashAlgorithm.Initialize();
         var result = hashAlgorithm.ComputeHash(data);
         var hash2 = Hash.FromBytes(result);
-        AssertTextAreEqual(HasherTests.BigExpected, hash2.ToString());
+        Assert.Equal(HasherTests.BigExpected, hash2.ToString());
     }
 }

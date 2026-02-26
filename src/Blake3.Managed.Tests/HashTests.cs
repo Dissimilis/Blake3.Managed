@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace Blake3.Managed.Tests;
 
-public class HashTests : Blake3TestsBase
+public class HashTests
 {
     [Fact]
     public unsafe void TestSize()
@@ -14,7 +14,7 @@ public class HashTests : Blake3TestsBase
     [Fact]
     public void TestFromBytes_And_ToString()
     {
-        AssertTextAreEqual("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", Hash.FromBytes(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()).ToString());
+        Assert.Equal("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", Hash.FromBytes(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()).ToString());
     }
 
     [Fact]

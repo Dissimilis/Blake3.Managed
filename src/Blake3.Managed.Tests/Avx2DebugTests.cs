@@ -4,7 +4,7 @@ using Blake3.Managed.Internal;
 
 namespace Blake3.Managed.Tests;
 
-public class Avx2DebugTests : Blake3TestsBase
+public class Avx2DebugTests
 {
     [Fact]
     public void TestAvx2TreeIntegration()
@@ -36,7 +36,7 @@ public class Avx2DebugTests : Blake3TestsBase
                 Assert.True(scalarCvs[c * 8 + w] == avx2Cvs[c * 8 + w], $"Chunk {c}, CV word {w} mismatch");
 
         var publicHash = Hasher.Hash(data);
-        AssertTextAreEqual(expected, publicHash.ToString());
+        Assert.Equal(expected, publicHash.ToString());
     }
 
     [Fact]
@@ -63,6 +63,6 @@ public class Avx2DebugTests : Blake3TestsBase
         thread.Join();
 
         Assert.True(caught == null, $"Exception on {stackSize / 1024} KB stack: {caught}");
-        AssertTextAreEqual(expected, result.ToString());
+        Assert.Equal(expected, result.ToString());
     }
 }

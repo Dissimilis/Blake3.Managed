@@ -6,7 +6,7 @@ using System.Text.Json;
 
 namespace Blake3.Managed.Tests;
 
-public class HasherTests : Blake3TestsBase
+public class HasherTests
 {
     private const string SimpleInput = "BLAKE3";
     public const string SimpleExpected = "f890484173e516bfd935ef3d22b912dc9738de38743993cfedf2c9473b3216a4";
@@ -19,7 +19,7 @@ public class HasherTests : Blake3TestsBase
     [Fact]
     public void TestHashSimple()
     {
-        AssertTextAreEqual(SimpleExpected, Hasher.Hash(SimpleData).ToString());
+        Assert.Equal(SimpleExpected, Hasher.Hash(SimpleData).ToString());
     }
 
     [Fact]
@@ -28,7 +28,7 @@ public class HasherTests : Blake3TestsBase
         using var hasher = Hasher.New();
         hasher.Update(BigData);
         var hash = hasher.Finalize();
-        AssertTextAreEqual(BigExpected, hash.ToString());
+        Assert.Equal(BigExpected, hash.ToString());
     }
 
     [Fact]
@@ -37,7 +37,7 @@ public class HasherTests : Blake3TestsBase
         using var hasher = Hasher.New();
         hasher.UpdateWithJoin(BigData);
         var hash = hasher.Finalize();
-        AssertTextAreEqual(BigExpected, hash.ToString());
+        Assert.Equal(BigExpected, hash.ToString());
     }
 
     [Fact]
@@ -46,7 +46,7 @@ public class HasherTests : Blake3TestsBase
         using var hasher = Hasher.NewKeyed(new ReadOnlySpan<byte>(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()));
         hasher.Update(SimpleData);
         var hash = hasher.Finalize();
-        AssertTextAreEqual(SimpleKeyedExpected, hash.ToString());
+        Assert.Equal(SimpleKeyedExpected, hash.ToString());
     }
 
     [Fact]
@@ -55,7 +55,7 @@ public class HasherTests : Blake3TestsBase
         using var hasher = Hasher.NewDeriveKey(new ReadOnlySpan<byte>(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()));
         hasher.Update(SimpleData);
         var hash = hasher.Finalize();
-        AssertTextAreEqual(SimpleDeriveKeyExpected, hash.ToString());
+        Assert.Equal(SimpleDeriveKeyExpected, hash.ToString());
     }
 
     internal static byte[] MakeTestInput(int length)
@@ -87,12 +87,12 @@ public class HasherTests : Blake3TestsBase
 
             var hash32 = hasher.Finalize();
             var expected32 = tc.Hash.Substring(0, 64);
-            AssertTextAreEqual(expected32, hash32.ToString());
+            Assert.Equal(expected32, hash32.ToString());
 
             var extended = new byte[131];
             hasher.Finalize(extended);
             var expectedExtended = tc.Hash;
-            AssertTextAreEqual(expectedExtended, Convert.ToHexString(extended).ToLowerInvariant());
+            Assert.Equal(expectedExtended, Convert.ToHexString(extended).ToLowerInvariant());
         }
     }
 
@@ -109,11 +109,11 @@ public class HasherTests : Blake3TestsBase
 
             var hash32 = hasher.Finalize();
             var expected32 = tc.KeyedHash.Substring(0, 64);
-            AssertTextAreEqual(expected32, hash32.ToString());
+            Assert.Equal(expected32, hash32.ToString());
 
             var extended = new byte[131];
             hasher.Finalize(extended);
-            AssertTextAreEqual(tc.KeyedHash, Convert.ToHexString(extended).ToLowerInvariant());
+            Assert.Equal(tc.KeyedHash, Convert.ToHexString(extended).ToLowerInvariant());
         }
     }
 
@@ -129,11 +129,11 @@ public class HasherTests : Blake3TestsBase
 
             var hash32 = hasher.Finalize();
             var expected32 = tc.DeriveKey.Substring(0, 64);
-            AssertTextAreEqual(expected32, hash32.ToString());
+            Assert.Equal(expected32, hash32.ToString());
 
             var extended = new byte[131];
             hasher.Finalize(extended);
-            AssertTextAreEqual(tc.DeriveKey, Convert.ToHexString(extended).ToLowerInvariant());
+            Assert.Equal(tc.DeriveKey, Convert.ToHexString(extended).ToLowerInvariant());
         }
     }
 
@@ -150,7 +150,7 @@ public class HasherTests : Blake3TestsBase
         for (var i = bigHash.Length; i > 0; i -= 1024)
         {
             hasher.Finalize(i - 1024, loopHash);
-            AssertTextAreEqual(bigHash.Slice(i - 1024, 1024).ToString(), loopHash.ToString());
+            Assert.Equal(bigHash.Slice(i - 1024, 1024).ToString(), loopHash.ToString());
             loopHash.CopyTo(reconstructedHash.Slice(i - 1024, 1024));
         }
 
@@ -165,8 +165,8 @@ public class HasherTests : Blake3TestsBase
         var hash32 = hasher.Finalize();
         var hash64 = new byte[64];
         hasher.Finalize(hash64);
-        AssertTextAreEqual(SimpleExpected, hash32.ToString());
-        AssertTextAreEqual(SimpleExpected, Convert.ToHexString(hash64.AsSpan(0, 32)).ToLowerInvariant());
+        Assert.Equal(SimpleExpected, hash32.ToString());
+        Assert.Equal(SimpleExpected, Convert.ToHexString(hash64.AsSpan(0, 32)).ToLowerInvariant());
     }
 
     [Fact]
@@ -176,7 +176,7 @@ public class HasherTests : Blake3TestsBase
         hasher.Update(MakeTestInput(512));
         hasher.Reset();
         hasher.Update(SimpleData);
-        AssertTextAreEqual(SimpleExpected, hasher.Finalize().ToString());
+        Assert.Equal(SimpleExpected, hasher.Finalize().ToString());
     }
 
     [Fact]
@@ -186,8 +186,8 @@ public class HasherTests : Blake3TestsBase
         hasher.Update(SimpleData);
         var hash1 = hasher.Finalize();
         var hash2 = hasher.Finalize();
-        AssertTextAreEqual(hash1.ToString(), hash2.ToString());
-        AssertTextAreEqual(SimpleExpected, hash1.ToString());
+        Assert.Equal(hash1.ToString(), hash2.ToString());
+        Assert.Equal(SimpleExpected, hash1.ToString());
     }
 
     [Fact]
@@ -197,7 +197,7 @@ public class HasherTests : Blake3TestsBase
         hasher.Update(ReadOnlySpan<byte>.Empty);
         hasher.Update(SimpleData);
         hasher.Update(ReadOnlySpan<byte>.Empty);
-        AssertTextAreEqual(SimpleExpected, hasher.Finalize().ToString());
+        Assert.Equal(SimpleExpected, hasher.Finalize().ToString());
     }
 
     [Fact]
