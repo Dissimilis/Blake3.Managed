@@ -455,17 +455,23 @@ internal static class Blake3Core
                 {
                     nint inputAddr = (nint)inputBase; // capture as nint; reconstruct inside lambda
 
-                    Parallel.For(0, avx2Batches, batchIdx =>
+                    int workerCount = Math.Min(Environment.ProcessorCount, avx2Batches);
+                    Parallel.For(0, workerCount, workerId =>
                     {
                         unsafe
                         {
-                            var batchPtr = (byte*)inputAddr + (long)(batchIdx * 8) * Blake3Constants.ChunkLen;
-                            var batchInput = new ReadOnlySpan<byte>(batchPtr, 8 * Blake3Constants.ChunkLen);
-                            Span<uint> batchCvs = cvBuffer.AsSpan(batchIdx * 64, 64); // 8 chunks × 8 words
-                            HashManyAvx2.HashMany(batchInput, 8,
-                                new ReadOnlySpan<uint>((uint*)keyAddr, 8),
-                                startCounter + (ulong)(batchIdx * 8),
-                                flagsCopy, batchCvs);
+                            int batchStart = avx2Batches * workerId / workerCount;
+                            int batchEnd = avx2Batches * (workerId + 1) / workerCount;
+                            for (int batchIdx = batchStart; batchIdx < batchEnd; batchIdx++)
+                            {
+                                var batchPtr = (byte*)inputAddr + (long)(batchIdx * 8) * Blake3Constants.ChunkLen;
+                                var batchInput = new ReadOnlySpan<byte>(batchPtr, 8 * Blake3Constants.ChunkLen);
+                                Span<uint> batchCvs = cvBuffer.AsSpan(batchIdx * 64, 64); // 8 chunks × 8 words
+                                HashManyAvx2.HashMany(batchInput, 8,
+                                    new ReadOnlySpan<uint>((uint*)keyAddr, 8),
+                                    startCounter + (ulong)(batchIdx * 8),
+                                    flagsCopy, batchCvs);
+                            }
                         }
                     });
                 }
