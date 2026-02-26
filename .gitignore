@@ -27,12 +27,11 @@ artifacts/
 # BenchmarkDotNet
 BenchmarkDotNet.Artifacts/
 
-# Test results
 TestResults/
 *.trx
-
-# OS
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 .DS_Store
+[Cc]*.md
+[Aa]*.md
