@@ -11,7 +11,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>Blake3.Managed</PackageId>
-    <Description>Pure managed C# implementation of the BLAKE3 cryptographic hash function. Uses hardware intrinsics (AVX2, SSE4.1) for high performance with automatic scalar fallback. Zero native dependencies.</Description>
+    <Description>Pure managed C# implementation of BLAKE3 using hardware intrinsics</Description>
     <Authors>Marius Vitkevičius</Authors>
     <Copyright>Copyright (c) 2026 Marius Vitkevičius</Copyright>
     <PackageTags>blake3;hash;cryptography;hashing;managed;intrinsics;avx2;sse;simd</PackageTags>

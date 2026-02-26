@@ -146,16 +146,6 @@ dotnet run --project src/Blake3.Managed.Benchmarks -c Release
 dotnet pack src/Blake3.Managed -c Release
 ```
 
-## Security
-
-This implementation passes all official BLAKE3 test vectors and uses constant-time hash comparison. See [SECURITY.md](SECURITY.md) for the security policy and responsible disclosure process.
-
-**Note:** This library has not been independently audited. For security-critical applications requiring audited implementations, consider the native reference implementation.
-
-## License
-
-[MIT](LICENSE)
-
 ## Acknowledgments
 
 - [Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel — API design and test infrastructure
