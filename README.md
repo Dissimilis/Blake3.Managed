@@ -119,6 +119,7 @@ AMD Ryzen 7 PRO 7840U w/ Radeon 780M Graphics 3.30GHz, 1 CPU, 16 logical and 8 p
 
 - For **small inputs** (< 1 KB): Blake3.Managed is similar native Rust performance
 - For **large inputs** (100 KB+): Blake3.Managed is ~1.5x slower than native
+- Take these results with a grain of salt, I don't have great benchmarking skills (PRs welcome)
 
 ### Hardware Intrinsics Tiering
 
