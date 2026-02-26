@@ -350,7 +350,9 @@ internal static class Blake3Core
         {
             var remaining = input;
             Span<uint> chunkCv = stackalloc uint[8];
-            Span<uint> batchCvs = HashManyAvx2.IsSupported ? stackalloc uint[8 * 8] : default;
+            Span<uint> batchCvs = HashManyAvx2.IsSupported ? stackalloc uint[8 * 8]
+                                : HashManyNeon.IsSupported ? stackalloc uint[4 * 8]
+                                : default;
 
             while (remaining.Length > 0)
             {
@@ -393,6 +395,37 @@ internal static class Blake3Core
                     }
 
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 8);
+                    continue;
+                }
+
+                // NEON 4-way fast path
+                if (HashManyNeon.IsSupported && _chunkState.Len == 0 && remaining.Length >= Blake3Constants.ChunkLen * 4)
+                {
+                    ulong startCounter = _chunkState.ChunkCounter;
+
+                    HashManyNeon.HashMany(remaining, 4, KeySpan, startCounter, _flags, batchCvs);
+
+                    bool hasMore = remaining.Length > Blake3Constants.ChunkLen * 4;
+                    int cvsToAdd = hasMore ? 4 : 3;
+
+                    for (int i = 0; i < cvsToAdd; i++)
+                    {
+                        ulong totalChunks = startCounter + (ulong)i + 1;
+                        AddChunkCv(batchCvs.Slice(i * 8, 8), totalChunks);
+                    }
+
+                    if (hasMore)
+                    {
+                        _chunkState = new ChunkState(KeySpan, startCounter + 4, _flags);
+                    }
+                    else
+                    {
+                        // Last batch: feed 4th chunk through _chunkState for correct Finalize
+                        _chunkState = new ChunkState(KeySpan, startCounter + 3, _flags);
+                        _chunkState.Update(remaining.Slice(Blake3Constants.ChunkLen * 3, Blake3Constants.ChunkLen));
+                    }
+
+                    remaining = remaining.Slice(Blake3Constants.ChunkLen * 4);
                     continue;
                 }
 
