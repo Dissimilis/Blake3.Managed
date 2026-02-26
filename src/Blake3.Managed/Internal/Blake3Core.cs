@@ -350,8 +350,8 @@ internal static class Blake3Core
         {
             var remaining = input;
             Span<uint> chunkCv = stackalloc uint[8];
-            Span<uint> batchCvs = HashManyAvx2.IsSupported ? stackalloc uint[8 * 8]
-                                : HashManyNeon.IsSupported ? stackalloc uint[4 * 8]
+            Span<uint> batchCvs = HashManyAvx2.IsSupported || HashManyNeon.IsSupported
+                                ? stackalloc uint[8 * 8]
                                 : default;
 
             while (remaining.Length > 0)

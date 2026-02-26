@@ -36,3 +36,6 @@ Desktop.ini
 [Cc]*.md
 [Aa]*.md
 /publish
+/publish-arm64
+publish-arm64.tar.gz
+source.tar.gz
