@@ -8,6 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <NoWarn>CS1591</NoWarn>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
 
     <!-- NuGet package metadata -->
     <PackageId>Blake3.Managed</PackageId>
