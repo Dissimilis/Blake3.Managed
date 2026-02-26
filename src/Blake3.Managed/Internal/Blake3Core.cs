@@ -442,8 +442,9 @@ internal static class Blake3Core
 
             ulong startCounter = _chunkState.ChunkCounter;
 
-            var keyArr = new uint[8];
-            KeySpan.CopyTo(keyArr);
+            uint* keyPtr = stackalloc uint[8];
+            KeySpan.CopyTo(new Span<uint>(keyPtr, 8));
+            nint keyAddr = (nint)keyPtr;
             uint flagsCopy = _flags;
 
             var cvBuffer = ArrayPool<uint>.Shared.Rent(parallelChunks * 8);
@@ -461,7 +462,8 @@ internal static class Blake3Core
                             var batchPtr = (byte*)inputAddr + (long)(batchIdx * 8) * Blake3Constants.ChunkLen;
                             var batchInput = new ReadOnlySpan<byte>(batchPtr, 8 * Blake3Constants.ChunkLen);
                             Span<uint> batchCvs = cvBuffer.AsSpan(batchIdx * 64, 64); // 8 chunks × 8 words
-                            HashManyAvx2.HashMany(batchInput, 8, keyArr,
+                            HashManyAvx2.HashMany(batchInput, 8,
+                                new ReadOnlySpan<uint>((uint*)keyAddr, 8),
                                 startCounter + (ulong)(batchIdx * 8),
                                 flagsCopy, batchCvs);
                         }

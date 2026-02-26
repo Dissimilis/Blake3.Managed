@@ -17,10 +17,6 @@ internal static class HashManyAvx2
         (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12,
         1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
 
-    // Uint-element offsets between same position in successive chunks (byte offset / 4)
-    private static readonly Vector256<int> ChunkStride = Vector256.Create(
-        0, 256, 512, 768, 1024, 1280, 1536, 1792);
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> RotateRight16(Vector256<uint> v)
     {
@@ -113,27 +109,86 @@ internal static class HashManyAvx2
         fixed (byte* chunksPtr = chunks)
         {
             Vector256<uint>* m = stackalloc Vector256<uint>[16];
-            var stride = ChunkStride;
 
             for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
             {
-                uint* blockBase = (uint*)(chunksPtr + blockIdx * 64);
-                m[0]  = Avx2.GatherVector256(blockBase,      stride, 4);
-                m[1]  = Avx2.GatherVector256(blockBase + 1,  stride, 4);
-                m[2]  = Avx2.GatherVector256(blockBase + 2,  stride, 4);
-                m[3]  = Avx2.GatherVector256(blockBase + 3,  stride, 4);
-                m[4]  = Avx2.GatherVector256(blockBase + 4,  stride, 4);
-                m[5]  = Avx2.GatherVector256(blockBase + 5,  stride, 4);
-                m[6]  = Avx2.GatherVector256(blockBase + 6,  stride, 4);
-                m[7]  = Avx2.GatherVector256(blockBase + 7,  stride, 4);
-                m[8]  = Avx2.GatherVector256(blockBase + 8,  stride, 4);
-                m[9]  = Avx2.GatherVector256(blockBase + 9,  stride, 4);
-                m[10] = Avx2.GatherVector256(blockBase + 10, stride, 4);
-                m[11] = Avx2.GatherVector256(blockBase + 11, stride, 4);
-                m[12] = Avx2.GatherVector256(blockBase + 12, stride, 4);
-                m[13] = Avx2.GatherVector256(blockBase + 13, stride, 4);
-                m[14] = Avx2.GatherVector256(blockBase + 14, stride, 4);
-                m[15] = Avx2.GatherVector256(blockBase + 15, stride, 4);
+                byte* blockBase = chunksPtr + blockIdx * 64;
+
+                // Load lower 8 words (0-7) from each of 8 chunks contiguously
+                var r0 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 0 * Blake3Constants.ChunkLen);
+                var r1 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 1 * Blake3Constants.ChunkLen);
+                var r2 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 2 * Blake3Constants.ChunkLen);
+                var r3 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 3 * Blake3Constants.ChunkLen);
+                var r4 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 4 * Blake3Constants.ChunkLen);
+                var r5 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 5 * Blake3Constants.ChunkLen);
+                var r6 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 6 * Blake3Constants.ChunkLen);
+                var r7 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 7 * Blake3Constants.ChunkLen);
+
+                // 8x8 transpose: chunk-major -> word-major (words 0-7)
+                var bt0 = Avx2.UnpackLow(r0, r1);
+                var bt1 = Avx2.UnpackHigh(r0, r1);
+                var bt2 = Avx2.UnpackLow(r2, r3);
+                var bt3 = Avx2.UnpackHigh(r2, r3);
+                var bt4 = Avx2.UnpackLow(r4, r5);
+                var bt5 = Avx2.UnpackHigh(r4, r5);
+                var bt6 = Avx2.UnpackLow(r6, r7);
+                var bt7 = Avx2.UnpackHigh(r6, r7);
+
+                var bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                var bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                var bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                var bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                var bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                var bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                var bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+                var bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+                m[0] = Avx2.Permute2x128(bu0, bu4, 0x20);
+                m[1] = Avx2.Permute2x128(bu1, bu5, 0x20);
+                m[2] = Avx2.Permute2x128(bu2, bu6, 0x20);
+                m[3] = Avx2.Permute2x128(bu3, bu7, 0x20);
+                m[4] = Avx2.Permute2x128(bu0, bu4, 0x31);
+                m[5] = Avx2.Permute2x128(bu1, bu5, 0x31);
+                m[6] = Avx2.Permute2x128(bu2, bu6, 0x31);
+                m[7] = Avx2.Permute2x128(bu3, bu7, 0x31);
+
+                // Load upper 8 words (8-15) from each of 8 chunks contiguously
+                r0 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 32);
+                r1 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 1 * Blake3Constants.ChunkLen + 32);
+                r2 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 2 * Blake3Constants.ChunkLen + 32);
+                r3 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 3 * Blake3Constants.ChunkLen + 32);
+                r4 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 4 * Blake3Constants.ChunkLen + 32);
+                r5 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 5 * Blake3Constants.ChunkLen + 32);
+                r6 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 6 * Blake3Constants.ChunkLen + 32);
+                r7 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 7 * Blake3Constants.ChunkLen + 32);
+
+                // 8x8 transpose: chunk-major -> word-major (words 8-15)
+                bt0 = Avx2.UnpackLow(r0, r1);
+                bt1 = Avx2.UnpackHigh(r0, r1);
+                bt2 = Avx2.UnpackLow(r2, r3);
+                bt3 = Avx2.UnpackHigh(r2, r3);
+                bt4 = Avx2.UnpackLow(r4, r5);
+                bt5 = Avx2.UnpackHigh(r4, r5);
+                bt6 = Avx2.UnpackLow(r6, r7);
+                bt7 = Avx2.UnpackHigh(r6, r7);
+
+                bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+                bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+                m[8]  = Avx2.Permute2x128(bu0, bu4, 0x20);
+                m[9]  = Avx2.Permute2x128(bu1, bu5, 0x20);
+                m[10] = Avx2.Permute2x128(bu2, bu6, 0x20);
+                m[11] = Avx2.Permute2x128(bu3, bu7, 0x20);
+                m[12] = Avx2.Permute2x128(bu0, bu4, 0x31);
+                m[13] = Avx2.Permute2x128(bu1, bu5, 0x31);
+                m[14] = Avx2.Permute2x128(bu2, bu6, 0x31);
+                m[15] = Avx2.Permute2x128(bu3, bu7, 0x31);
 
                 // Block flags
                 uint blockFlags = flags;
