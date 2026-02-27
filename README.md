@@ -11,13 +11,13 @@ A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/
 ## Features
 
 - **Pure managed C#** - no native libraries, no P/Invoke, runs everywhere .NET runs
-- **Hardware accelerated** - AVX2 8-way parallel hashing, SSE4.1 vectorized compression, automatic scalar fallback
+- **Hardware accelerated** - AVX2 8-way parallel hashing, SSE4.1 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
 - **Multi-threaded** - uses the thread pool for parallel chunk processing on large inputs (>64 KiB)
 - **Zero allocation** for small inputs - one-shot `Hasher.Hash()` uses stack allocation
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
 - **XOF support** - extendable output with seekable byte stream
 - **API compatible** - similar API to the Blake3 Rust API and mirrors [Blake3.NET](https://github.com/xoofx/Blake3.NET) API surface
-- **Targets** `net6.0` and `net8.0` (with hardware intrinsics)
+- **Targets** `net6.0`, `net8.0` and `net10.0` (with hardware intrinsics)
 
 ## Blake3.NET
 
@@ -131,8 +131,9 @@ The implementation automatically selects the best available instruction set at r
 
 | Tier | Instructions | Parallelism |
 |------|-------------|-------------|
-| **AVX2** | 256-bit vectors + gather | 8 chunks simultaneously |
+| **AVX2** | 256-bit vectors | 8 chunks simultaneously |
 | **SSE4.1** | 128-bit vectors + shuffle | Single-lane SIMD |
+| **ARM NEON** | 128-bit vectors | 4 chunks simultaneously |
 | **Scalar** | Pure C# | Portable fallback |
 
 ## Building from Source
