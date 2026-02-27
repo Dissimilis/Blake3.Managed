@@ -1,6 +1,6 @@
 # Blake3.Managed
 
-A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function. Uses hardware intrinsics (AVX2, SSE4.1) for high performance with automatic scalar fallback. Zero native dependencies.
+A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function. Uses hardware intrinsics (AVX2, SSE/SSSE3, ARM NEON) for high performance with automatic scalar fallback. Zero native dependencies.
 
 [![NuGet](https://img.shields.io/nuget/v/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
@@ -11,7 +11,7 @@ A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/
 ## Features
 
 - **Pure managed C#** - no native libraries, no P/Invoke, runs everywhere .NET runs
-- **Hardware accelerated** - AVX2 8-way parallel hashing, SSE4.1 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
+- **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
 - **Multi-threaded** - uses the thread pool for parallel chunk processing on large inputs (>64 KiB)
 - **Zero allocation** for small inputs - one-shot `Hasher.Hash()` uses stack allocation
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
@@ -132,7 +132,7 @@ The implementation automatically selects the best available instruction set at r
 | Tier | Instructions | Parallelism |
 |------|-------------|-------------|
 | **AVX2** | 256-bit vectors | 8 chunks simultaneously |
-| **SSE4.1** | 128-bit vectors + shuffle | Single-lane SIMD |
+| **SSE/SSSE3** | 128-bit vectors + shuffle | Single-lane SIMD |
 | **ARM NEON** | 128-bit vectors | 4 chunks simultaneously |
 | **Scalar** | Pure C# | Portable fallback |
 
