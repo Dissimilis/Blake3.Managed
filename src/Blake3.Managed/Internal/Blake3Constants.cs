@@ -17,23 +17,18 @@ internal static class Blake3Constants
     public const uint DeriveKeyContext = 1 << 5;
     public const uint DeriveKeyMaterial = 1 << 6;
 
-    // IV words (same as SHA-256)
-    public static ReadOnlySpan<uint> IV => new uint[]
+    private static readonly uint[] Iv =
     {
         0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
         0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
     };
 
-    // Message word permutation for each round
-    public static ReadOnlySpan<byte> MsgPermutation => new byte[]
+    private static readonly byte[] MessagePermutation =
     {
         2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
     };
 
-    // Precomputed 7-round message schedule (avoids runtime permutation)
-    // Round 0: identity [0..15]
-    // Round 1..6: apply MsgPermutation iteratively
-    public static ReadOnlySpan<byte> MsgSchedule => new byte[]
+    private static readonly byte[] MessageSchedule =
     {
         // Round 0
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -50,4 +45,15 @@ internal static class Blake3Constants
         // Round 6
         11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13,
     };
+
+    // IV words (same as SHA-256)
+    public static ReadOnlySpan<uint> IV => Iv;
+
+    // Message word permutation for each round
+    public static ReadOnlySpan<byte> MsgPermutation => MessagePermutation;
+
+    // Precomputed 7-round message schedule (avoids runtime permutation)
+    // Round 0: identity [0..15]
+    // Round 1..6: apply MsgPermutation iteratively
+    public static ReadOnlySpan<byte> MsgSchedule => MessageSchedule;
 }
