@@ -39,3 +39,7 @@ Desktop.ini
 /publish-arm64
 publish-arm64.tar.gz
 source.tar.gz
+
+# AI tooling
+.claude/
+.serena/

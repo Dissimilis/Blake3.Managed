@@ -6,7 +6,10 @@ internal static class Blake3Constants
     public const int ChunkLen = 1024;
     public const int KeyLen = 32;
     public const int OutLen = 32;
-    public const int MaxDepth = 32; // supports 2^32 chunks = 4 TB; was 54 (18 PB)
+    // CV stack depth. The stack holds one CV per set bit of the chunk count, so depth 54
+    // supports 2^54 chunks = the full 2^64-byte BLAKE3 input range. Must not be lower:
+    // PushCv has no overflow guard, and exceeding the depth would corrupt memory.
+    public const int MaxDepth = 54;
 
     // Domain separation flags
     public const uint ChunkStart = 1 << 0;

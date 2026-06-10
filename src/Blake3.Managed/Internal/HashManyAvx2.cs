@@ -307,4 +307,219 @@ internal static class HashManyAvx2
         VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x31), ref outRef, 48);   // chunk 6
         VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x31), ref outRef, 56);   // chunk 7
     }
+
+    /// <summary>
+    /// Compresses 8 parent nodes in parallel. Input is 8 consecutive 64-byte parent
+    /// blocks (each = left CV || right CV, 128 uints total); output is 8 CVs (64 uints).
+    /// Counter is 0 and block length is 64 for all parent nodes. All input is loaded
+    /// before output is stored, so input and output may overlap.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashParents8(ReadOnlySpan<uint> parentBlocks,
+                                           ReadOnlySpan<uint> key, uint flags,
+                                           Span<uint> cvs)
+    {
+        Vector256<uint> cv0, cv1, cv2, cv3, cv4, cv5, cv6, cv7;
+
+        fixed (uint* inPtr = parentBlocks)
+        {
+            byte* basePtr = (byte*)inPtr;
+            Vector256<uint>* m = stackalloc Vector256<uint>[16];
+
+            // Load lower 8 words (0-7) of each of the 8 parent blocks (stride 64B)
+            var r0 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 0 * 64);
+            var r1 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 1 * 64);
+            var r2 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 2 * 64);
+            var r3 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 3 * 64);
+            var r4 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 4 * 64);
+            var r5 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 5 * 64);
+            var r6 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 6 * 64);
+            var r7 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 7 * 64);
+
+            // 8x8 transpose: block-major -> word-major (words 0-7)
+            var bt0 = Avx2.UnpackLow(r0, r1);
+            var bt1 = Avx2.UnpackHigh(r0, r1);
+            var bt2 = Avx2.UnpackLow(r2, r3);
+            var bt3 = Avx2.UnpackHigh(r2, r3);
+            var bt4 = Avx2.UnpackLow(r4, r5);
+            var bt5 = Avx2.UnpackHigh(r4, r5);
+            var bt6 = Avx2.UnpackLow(r6, r7);
+            var bt7 = Avx2.UnpackHigh(r6, r7);
+
+            var bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+            var bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+            var bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+            var bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+            var bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+            var bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+            var bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+            var bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+            m[0] = Avx2.Permute2x128(bu0, bu4, 0x20);
+            m[1] = Avx2.Permute2x128(bu1, bu5, 0x20);
+            m[2] = Avx2.Permute2x128(bu2, bu6, 0x20);
+            m[3] = Avx2.Permute2x128(bu3, bu7, 0x20);
+            m[4] = Avx2.Permute2x128(bu0, bu4, 0x31);
+            m[5] = Avx2.Permute2x128(bu1, bu5, 0x31);
+            m[6] = Avx2.Permute2x128(bu2, bu6, 0x31);
+            m[7] = Avx2.Permute2x128(bu3, bu7, 0x31);
+
+            // Load upper 8 words (8-15) of each of the 8 parent blocks
+            r0 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 0 * 64 + 32);
+            r1 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 1 * 64 + 32);
+            r2 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 2 * 64 + 32);
+            r3 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 3 * 64 + 32);
+            r4 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 4 * 64 + 32);
+            r5 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 5 * 64 + 32);
+            r6 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 6 * 64 + 32);
+            r7 = Unsafe.ReadUnaligned<Vector256<uint>>(basePtr + 7 * 64 + 32);
+
+            bt0 = Avx2.UnpackLow(r0, r1);
+            bt1 = Avx2.UnpackHigh(r0, r1);
+            bt2 = Avx2.UnpackLow(r2, r3);
+            bt3 = Avx2.UnpackHigh(r2, r3);
+            bt4 = Avx2.UnpackLow(r4, r5);
+            bt5 = Avx2.UnpackHigh(r4, r5);
+            bt6 = Avx2.UnpackLow(r6, r7);
+            bt7 = Avx2.UnpackHigh(r6, r7);
+
+            bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+            bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+            bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+            bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+            bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+            bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+            bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+            bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+            m[8]  = Avx2.Permute2x128(bu0, bu4, 0x20);
+            m[9]  = Avx2.Permute2x128(bu1, bu5, 0x20);
+            m[10] = Avx2.Permute2x128(bu2, bu6, 0x20);
+            m[11] = Avx2.Permute2x128(bu3, bu7, 0x20);
+            m[12] = Avx2.Permute2x128(bu0, bu4, 0x31);
+            m[13] = Avx2.Permute2x128(bu1, bu5, 0x31);
+            m[14] = Avx2.Permute2x128(bu2, bu6, 0x31);
+            m[15] = Avx2.Permute2x128(bu3, bu7, 0x31);
+
+            Vector256<uint> s0 = Vector256.Create(key[0]);
+            Vector256<uint> s1 = Vector256.Create(key[1]);
+            Vector256<uint> s2 = Vector256.Create(key[2]);
+            Vector256<uint> s3 = Vector256.Create(key[3]);
+            Vector256<uint> s4 = Vector256.Create(key[4]);
+            Vector256<uint> s5 = Vector256.Create(key[5]);
+            Vector256<uint> s6 = Vector256.Create(key[6]);
+            Vector256<uint> s7 = Vector256.Create(key[7]);
+            Vector256<uint> s8 = Vector256.Create(Blake3Constants.IV[0]);
+            Vector256<uint> s9 = Vector256.Create(Blake3Constants.IV[1]);
+            Vector256<uint> s10 = Vector256.Create(Blake3Constants.IV[2]);
+            Vector256<uint> s11 = Vector256.Create(Blake3Constants.IV[3]);
+            Vector256<uint> s12 = Vector256<uint>.Zero;                      // counter lo
+            Vector256<uint> s13 = Vector256<uint>.Zero;                      // counter hi
+            Vector256<uint> s14 = Vector256.Create((uint)Blake3Constants.BlockLen);
+            Vector256<uint> s15 = Vector256.Create(flags);
+
+            // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+            G256(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+            // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
+            G256(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+            // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
+            G256(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+            // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
+            G256(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+            // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
+            G256(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+            // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
+            G256(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+            // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
+            G256(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
+            G256(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
+            G256(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
+            G256(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
+            G256(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
+            G256(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
+            G256(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
+            G256(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+
+            cv0 = Avx2.Xor(s0, s8);
+            cv1 = Avx2.Xor(s1, s9);
+            cv2 = Avx2.Xor(s2, s10);
+            cv3 = Avx2.Xor(s3, s11);
+            cv4 = Avx2.Xor(s4, s12);
+            cv5 = Avx2.Xor(s5, s13);
+            cv6 = Avx2.Xor(s6, s14);
+            cv7 = Avx2.Xor(s7, s15);
+        }
+
+        // 8x8 transpose: word-major to block-major
+        var t0 = Avx2.UnpackLow(cv0, cv1);
+        var t1 = Avx2.UnpackHigh(cv0, cv1);
+        var t2 = Avx2.UnpackLow(cv2, cv3);
+        var t3 = Avx2.UnpackHigh(cv2, cv3);
+        var t4 = Avx2.UnpackLow(cv4, cv5);
+        var t5 = Avx2.UnpackHigh(cv4, cv5);
+        var t6 = Avx2.UnpackLow(cv6, cv7);
+        var t7 = Avx2.UnpackHigh(cv6, cv7);
+
+        var u0 = Avx2.UnpackLow(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u1 = Avx2.UnpackHigh(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u2 = Avx2.UnpackLow(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u3 = Avx2.UnpackHigh(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u4 = Avx2.UnpackLow(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u5 = Avx2.UnpackHigh(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u6 = Avx2.UnpackLow(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+        var u7 = Avx2.UnpackHigh(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x20), ref outRef);       // parent 0
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x20), ref outRef, 8);    // parent 1
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x20), ref outRef, 16);   // parent 2
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x20), ref outRef, 24);   // parent 3
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x31), ref outRef, 32);   // parent 4
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x31), ref outRef, 40);   // parent 5
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x31), ref outRef, 48);   // parent 6
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x31), ref outRef, 56);   // parent 7
+    }
 }

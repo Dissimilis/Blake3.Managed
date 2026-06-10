@@ -85,44 +85,45 @@ var parallelHash = parallel.Finalize();
 One-shot hashing (`Hasher.Hash(data)`) compared against [Blake3.NET](https://github.com/xoofx/Blake3.NET) (native Rust P/Invoke) and `System.Security.Cryptography.SHA256`:
 
 ```
-BenchmarkDotNet v0.15.8, Windows 11 (10.0.26100.7921/24H2)
+BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8457/25H2)
 AMD Ryzen 7 PRO 7840U w/ Radeon 780M Graphics 3.30GHz, 1 CPU, 16 logical and 8 physical cores
-.NET SDK 10.0.103
-  [Host] : .NET 10.0.3 (10.0.326.7603), X64 RyuJIT x86-64-v4
+.NET SDK 10.0.300
+  [Host] : .NET 10.0.8 (10.0.826.23019), X64 RyuJIT x86-64-v4
 ```
 
 | Method                     | Data Size |       Mean | Ratio |
 |--------------------------- |----------:|-----------:|------:|
-| **Blake3 (native)**        |     **4 B** |    **70.7 ns** |  **1.00** |
-| Blake3.Managed             |       4 B |    75.5 ns |  1.07 |
-| Blake3.Managed (HashAlgo)  |       4 B |   157.2 ns |  2.23 |
-| SHA256                     |       4 B |   165.1 ns |  2.34 |
+| **Blake3 (native)**        |     **4 B** |    **67.6 ns** |  **1.00** |
+| Blake3.Managed             |       4 B |    72.5 ns |  1.07 |
+| Blake3.Managed (HashAlgo)  |       4 B |   144.7 ns |  2.14 |
+| SHA256                     |       4 B |   131.3 ns |  1.94 |
 |                            |           |            |       |
-| **Blake3 (native)**        |   **100 B** |   **123.2 ns** |  **1.00** |
-| Blake3.Managed             |     100 B |   127.7 ns |  1.04 |
-| Blake3.Managed (HashAlgo)  |     100 B |   196.0 ns |  1.59 |
-| SHA256                     |     100 B |   186.8 ns |  1.52 |
+| **Blake3 (native)**        |   **100 B** |   **119.7 ns** |  **1.00** |
+| Blake3.Managed             |     100 B |   124.0 ns |  1.04 |
+| Blake3.Managed (HashAlgo)  |     100 B |   228.4 ns |  1.91 |
+| SHA256                     |     100 B |   192.4 ns |  1.61 |
 |                            |           |            |       |
-| **Blake3 (native)**        |  **1000 B** |   **822.4 ns** |  **1.00** |
-| Blake3.Managed             |    1000 B |   913.4 ns |  1.11 |
-| SHA256                     |    1000 B |   592.1 ns |  0.72 |
+| **Blake3 (native)**        |  **1000 B** |   **840.4 ns** |  **1.00** |
+| Blake3.Managed             |    1000 B |   883.9 ns |  1.05 |
+| SHA256                     |    1000 B |   542.0 ns |  0.64 |
 |                            |           |            |       |
-| **Blake3 (native)**        | **10 KB** |   **2.90 us** |  **1.00** |
-| Blake3.Managed             |   10 KB |   4.41 us |  1.52 |
-| SHA256                     |   10 KB |   4.45 us |  1.53 |
+| **Blake3 (native)**        | **10 KB** |   **2.83 us** |  **1.00** |
+| Blake3.Managed             |   10 KB |   3.76 us |  1.33 |
+| SHA256                     |   10 KB |   4.55 us |  1.61 |
 |                            |           |            |       |
-| **Blake3 (native)**        | **100 KB** |  **18.38 us** |  **1.00** |
-| Blake3.Managed             |  100 KB |  24.86 us |  1.36 |
-| SHA256                     |  100 KB |  45.37 us |  2.49 |
+| **Blake3 (native)**        | **100 KB** |  **14.78 us** |  **1.00** |
+| Blake3.Managed             |  100 KB |  21.79 us |  1.47 |
+| SHA256                     |  100 KB |  43.87 us |  2.97 |
 |                            |           |            |       |
-| **Blake3 (native)**        |  **1 MB** | **143.7 us** |  **1.00** |
-| Blake3.Managed             |    1 MB | 215.4 us |  1.50 |
-| SHA256                     |    1 MB | 434.3 us |  3.03 |
+| **Blake3 (native)**        |  **1 MB** | **142.6 us** |  **1.00** |
+| Blake3.Managed             |    1 MB |  60.2 us |  0.42 |
+| SHA256                     |    1 MB | 434.3 us |  3.05 |
 
-![Benchmark results](img/benchmark_v0226.jpg)
+![Benchmark results](img/benchmark_v0610.jpg)
 
 - For **small inputs** (< 1 KB): Blake3.Managed is similar native Rust performance
-- For **large inputs** (100 KB+): Blake3.Managed is ~1.5x slower than native
+- For **medium inputs** (10-100 KB): Blake3.Managed is ~1.3-1.5x slower than native
+- For **large inputs** (> 128 KB): Blake3.Managed one-shot `Hash()` is *faster* than native (2.4x at 1 MB), because it hashes 64-chunk subtrees in parallel on the thread pool while the native one-shot is single-threaded. Single-threaded `Update()` remains slower than native.
 - Take these results with a grain of salt, I don't have great benchmarking skills (PRs welcome)
 
 ### Hardware Intrinsics Tiering
@@ -131,8 +132,8 @@ The implementation automatically selects the best available instruction set at r
 
 | Tier | Instructions | Parallelism |
 |------|-------------|-------------|
-| **AVX2** | 256-bit vectors | 8 chunks simultaneously |
-| **SSE/SSSE3** | 128-bit vectors + shuffle | Single-lane SIMD |
+| **AVX2** | 256-bit vectors | 8 chunks simultaneously, plus 8-way parent-node hashing for the merge tree |
+| **SSE/SSSE3** | 128-bit vectors + shuffle | 4 chunks simultaneously, single-lane SIMD fallback |
 | **ARM NEON** | 128-bit vectors | 4 chunks simultaneously |
 | **Scalar** | Pure C# | Portable fallback |
 
