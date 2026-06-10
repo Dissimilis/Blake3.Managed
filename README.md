@@ -1,6 +1,8 @@
-# Blake3.Managed
+# Blake3.Managed — BLAKE3 hash function for .NET
 
-A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function. Uses hardware intrinsics (AVX2, SSE/SSSE3, ARM NEON) for high performance with automatic scalar fallback. Zero native dependencies.
+A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function for .NET. Uses hardware intrinsics (AVX2, SSE/SSSE3, ARM NEON) for high performance with automatic scalar fallback — faster than SHA-256 and MD5, with zero native dependencies and no P/Invoke.
+
+BLAKE3 is a modern, secure hash ideal for file checksums, content addressing, deduplication, data integrity, message authentication (keyed MAC) and key derivation (KDF). This library brings it to C# / .NET as a single fully managed, Native AOT-friendly NuGet package that runs everywhere .NET runs.
 
 [![NuGet](https://img.shields.io/nuget/v/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
@@ -19,11 +21,11 @@ A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/
 - **API compatible** - similar API to the Blake3 Rust API and mirrors [Blake3.NET](https://github.com/xoofx/Blake3.NET) API surface
 - **Targets** `net6.0`, `net8.0` and `net10.0` (with hardware intrinsics)
 
-## Blake3.NET
+## Blake3.Managed vs Blake3.NET (native wrapper)
 
-[Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel is the fastest and very polished BLAKE3 library for .NET I could find - it wraps the official Rust implementation via P/Invoke and is hard to beat on raw throughput. If native dependencies work for your project, it's an excellent choice.
+[Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel is a very polished BLAKE3 library for .NET - it wraps the official Rust implementation via P/Invoke. If native dependencies work for your project, it's an excellent choice.
 
-This library exists for cases where a fully managed solution is preferred - easier deployment, no native binaries to ship, and support for platforms where the Rust library isn't available. My goal was to get as close to native performance as possible while staying pure C#. Some ideas and code examples are borrowed from Blake3.NET.
+This library exists for cases where a fully managed solution is preferred - easier deployment, no native binaries to ship, Native AOT and trimming friendliness, and support for platforms where the Rust library isn't available. My goal was to get as close to native performance as possible while staying pure C# - small inputs hash within ~5% of native, and one-shot hashing of large inputs (> 128 KB) is now faster than the native wrapper thanks to multithreaded subtree hashing (see benchmarks below). Some ideas and code examples are borrowed from Blake3.NET.
 
 ## Installation
 
