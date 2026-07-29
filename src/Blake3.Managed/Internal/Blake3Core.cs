@@ -316,14 +316,67 @@ internal static class Blake3Core
         private ChunkState _chunkState;
         private readonly uint _flags;
 
+        // A complete chunk's CV produced by a SIMD batch that has NOT yet been merged into the
+        // stack, because it may turn out to be the final chunk.
+        //
+        // Finalize needs the last chunk's chaining value as the right child of the root parent.
+        // It used to obtain that by re-running the whole chunk through _chunkState -- 16 further
+        // compressions to recompute a value the SIMD kernel had already produced and discarded.
+        // Holding the CV here instead defers the decision: if more input arrives it is merged
+        // normally, and if not, Finalize consumes it directly.
+        private unsafe fixed uint _pendingCv[8];
+        private bool _hasPendingCv;
+        private ulong _pendingCvTotalChunks;
+
         public HasherState(ReadOnlySpan<uint> key, uint flags)
         {
             // The CV stack needs no clearing: slots are always written by PushCv before
             // PopCv/Finalize read them (Reset() already relies on this).
             _cvStackLen = 0;
             _flags = flags;
+            _hasPendingCv = false;
+            _pendingCvTotalChunks = 0;
             key[..8].CopyTo(KeySpan);
             _chunkState = new ChunkState(key, 0, flags);
+        }
+
+        private unsafe Span<uint> PendingCvSpan
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                fixed (uint* p = _pendingCv) return new Span<uint>(p, 8);
+            }
+        }
+
+        /// <summary>
+        /// Merges a deferred chunk CV into the stack. Called before any new input is consumed:
+        /// once more data exists, the deferred chunk is definitely not the last one.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void FlushPendingCv()
+        {
+            if (!_hasPendingCv) return;
+
+            _hasPendingCv = false;
+            AddChunkCv(PendingCvSpan, _pendingCvTotalChunks);
+        }
+
+        /// <summary>
+        /// Defers the CV of the final complete chunk of a SIMD batch instead of re-hashing it.
+        /// </summary>
+        /// <remarks>
+        /// Only called after at least three sibling CVs from the same batch have been merged, so
+        /// the CV stack is never empty here. That matters: a deferred CV can only serve as the
+        /// right child of a root *parent* node. Were the stack empty, the root would have to be
+        /// the chunk itself, which needs its pre-final-block state and not just its CV.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void DeferChunkCv(ReadOnlySpan<uint> cv, ulong totalChunks)
+        {
+            cv.Slice(0, 8).CopyTo(PendingCvSpan);
+            _pendingCvTotalChunks = totalChunks;
+            _hasPendingCv = true;
         }
 
         private unsafe Span<uint> KeySpan
@@ -394,6 +447,11 @@ internal static class Blake3Core
         {
             const int subtreeChunks = 64;
 
+            if (input.Length == 0) return;
+
+            // New input means any deferred chunk is not the last one after all.
+            FlushPendingCv();
+
             var remaining = input;
             Span<uint> chunkCv = stackalloc uint[8];
             Span<uint> batchCvs = HashManyAvx2.IsSupported
@@ -456,15 +514,13 @@ internal static class Blake3Core
                         AddChunkCv(batchCvs.Slice(i * 8, 8), totalChunks);
                     }
 
-                    if (hasMore)
+                    _chunkState = new ChunkState(KeySpan, startCounter + 8, _flags);
+
+                    if (!hasMore)
                     {
-                        _chunkState = new ChunkState(KeySpan, startCounter + 8, _flags);
-                    }
-                    else
-                    {
-                        // Last batch: feed 8th chunk through _chunkState for correct Finalize
-                        _chunkState = new ChunkState(KeySpan, startCounter + 7, _flags);
-                        _chunkState.Update(remaining.Slice(Blake3Constants.ChunkLen * 7, Blake3Constants.ChunkLen));
+                        // Input ends exactly on the batch boundary. The 8th chunk's CV is already
+                        // in batchCvs; defer it rather than re-hashing those 1024 bytes.
+                        DeferChunkCv(batchCvs.Slice(7 * 8, 8), startCounter + 8);
                     }
 
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 8);
@@ -491,15 +547,13 @@ internal static class Blake3Core
                         AddChunkCv(batchCvs.Slice(i * 8, 8), totalChunks);
                     }
 
-                    if (hasMore)
+                    _chunkState = new ChunkState(KeySpan, startCounter + 4, _flags);
+
+                    if (!hasMore)
                     {
-                        _chunkState = new ChunkState(KeySpan, startCounter + 4, _flags);
-                    }
-                    else
-                    {
-                        // Last batch: feed 4th chunk through _chunkState for correct Finalize
-                        _chunkState = new ChunkState(KeySpan, startCounter + 3, _flags);
-                        _chunkState.Update(remaining.Slice(Blake3Constants.ChunkLen * 3, Blake3Constants.ChunkLen));
+                        // Input ends exactly on the batch boundary; the 4th chunk's CV is already
+                        // in batchCvs. Same deferral as the 8-way path above.
+                        DeferChunkCv(batchCvs.Slice(3 * 8, 8), startCounter + 4);
                     }
 
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 4);
@@ -530,6 +584,11 @@ internal static class Blake3Core
         public unsafe void UpdateWithJoin(ReadOnlySpan<byte> input)
         {
             const int chunkLen = Blake3Constants.ChunkLen;
+
+            if (input.Length == 0) return;
+
+            // As in Update: new input means a deferred chunk is not the last one.
+            FlushPendingCv();
             const int subtreeChunks = 64;
             const int subtreeLen = subtreeChunks * chunkLen;
 
@@ -641,15 +700,29 @@ internal static class Blake3Core
         [SkipLocalsInit]
         public Output Finalize()
         {
-            var output = _chunkState.CreateOutput();
-
-            if (_cvStackLen == 0)
-            {
-                return output;
-            }
-
             Span<uint> chunkCv = stackalloc uint[8];
-            output.ChainingValue(chunkCv);
+
+            if (_hasPendingCv && _chunkState.Len == 0)
+            {
+                // The deferred chunk really was the last one. Its CV is already known, so the
+                // whole chunk (16 compressions) does not have to be hashed a second time.
+                // DeferChunkCv only runs with a non-empty stack, so the root is a parent node
+                // and the CV alone is sufficient.
+                PendingCvSpan.CopyTo(chunkCv);
+            }
+            else
+            {
+                FlushPendingCv();
+
+                var output = _chunkState.CreateOutput();
+
+                if (_cvStackLen == 0)
+                {
+                    return output;
+                }
+
+                output.ChainingValue(chunkCv);
+            }
 
             Span<uint> parentBlock = stackalloc uint[16];
             Span<uint> leftCv = stackalloc uint[8];
@@ -683,6 +756,7 @@ internal static class Blake3Core
         public void Reset()
         {
             _cvStackLen = 0;
+            _hasPendingCv = false;
             _chunkState = new ChunkState(KeySpan, 0, _flags);
         }
     }

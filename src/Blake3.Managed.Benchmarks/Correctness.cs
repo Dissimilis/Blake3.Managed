@@ -411,11 +411,14 @@ internal static class Correctness
         int checks = 0;
         var expected = Hex(NativeHasher.Hash(data).AsSpan());
 
+        // Hoisted out of the loops below: stackalloc inside a loop accumulates for the whole
+        // frame rather than being reclaimed per iteration.
+        Span<byte> actual = stackalloc byte[32];
+
         foreach (var split in new[] { 1, 63, 64, 65, 1023, 1024, 1025, 4096, 8192 })
         {
             if (split >= data.Length) continue;
 
-            Span<byte> actual = stackalloc byte[32];
             using (var ours = ManagedHasher.New())
             {
                 ours.Update(data.AsSpan(0, split));
@@ -432,7 +435,6 @@ internal static class Correctness
         // counter -- the case the parallel path's alignment guard exists to reject.
         if (data.Length > 2048)
         {
-            Span<byte> actual = stackalloc byte[32];
             using (var ours = ManagedHasher.New())
             {
                 ours.Update(data.AsSpan(0, 100));
@@ -447,11 +449,10 @@ internal static class Correctness
             // Repeated parallel runs: an intermittent race shows up as a mismatch on some pass.
             for (int repeat = 0; repeat < 3; repeat++)
             {
-                Span<byte> repeated = stackalloc byte[32];
                 using var hasher = ManagedHasher.New();
                 hasher.UpdateWithJoin(data);
-                hasher.Finalize(repeated);
-                Assert(expected, Hex(repeated), $"UpdateWithJoin repeat {repeat} [{pattern}]", data.Length);
+                hasher.Finalize(actual);
+                Assert(expected, Hex(actual), $"UpdateWithJoin repeat {repeat} [{pattern}]", data.Length);
                 checks++;
             }
         }
@@ -468,18 +469,19 @@ internal static class Correctness
         int checks = 0;
         var backing = MakeData(64 + 8192, Pattern.ChunkMarked);
 
+        Span<byte> expected = stackalloc byte[32];
+        Span<byte> actual = stackalloc byte[32];
+
         foreach (var offset in new[] { 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63 })
         {
             var slice = backing.AsSpan(offset, 8192);
 
-            Span<byte> expected = stackalloc byte[32];
             using (var native = NativeHasher.New())
             {
                 native.Update(slice);
                 native.Finalize(expected);
             }
 
-            Span<byte> actual = stackalloc byte[32];
             using (var ours = ManagedHasher.New())
             {
                 ours.UpdateWithJoin(slice);
