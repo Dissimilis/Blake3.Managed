@@ -128,6 +128,8 @@ AMD Ryzen 7 PRO 7840U w/ Radeon 780M Graphics 3.30GHz, 1 CPU, 16 logical and 8 p
 - For **large inputs** (> 128 KB): Blake3.Managed one-shot `Hash()` is *faster* than native (2.4x at 1 MB), because it hashes 64-chunk subtrees in parallel on the thread pool while the native one-shot is single-threaded. Single-threaded `Update()` remains slower than native.
 - Take these results with a grain of salt, I don't have great benchmarking skills (PRs welcome)
 
+Third-party numbers: [CryptoHives benchmark trends](https://cryptohives.github.io/Foundation/packages/security/cryptography/benchmark-trends/index.html#platform=windows-x64-amd-ryzen-5-7600x&category=Hash&family=BLAKE3&method=TryComputeHash&metric=mean_ns&range=90&mode=scaling&log=1) tracks this library against other C# BLAKE3 implementations on a Ryzen 5 7600X and an Apple M4.
+
 ### Hardware Intrinsics Tiering
 
 The implementation automatically selects the best available instruction set at runtime:
