@@ -208,7 +208,7 @@ internal static class Correctness
                 break;
 
             case Pattern.Random:
-                new Random(length * 2654435761u is var _ ? unchecked(length * 31 + 17) : 0).NextBytes(data);
+                new Random(unchecked(length * 31 + 17)).NextBytes(data);
                 break;
 
             case Pattern.ChunkMarked:

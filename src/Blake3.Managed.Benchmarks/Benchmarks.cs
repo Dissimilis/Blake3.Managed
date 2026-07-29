@@ -27,23 +27,35 @@ internal static class Sizes
 }
 
 /// <summary>
-/// THE DECISION HARNESS: frozen pre-optimization code versus current code, measured back to back
-/// in one process.
+/// THE DECISION HARNESS: frozen pre-optimization code versus current code.
 ///
 /// This exists because ratio-against-an-external-reference does not survive thermal throttling.
 /// Observed on this machine across two sessions: single-threaded sizes held their ratio to the
 /// Rust reference (8 KB: 2.21 then 2.14), but multithreaded sizes drifted badly (128 KB: 1.22 then
-/// 1.51) with no code change at all. A ratio between our own two builds, alternated within a
-/// single run, is the only figure that answers "did this commit make it faster".
+/// 1.51) with no code change at all. The cause is that our path is multithreaded and the reference
+/// is not, so throttling is not a common factor that divides out. Pairing our own two builds
+/// removes that asymmetry: both rows of a pair have identical threading behaviour, so thermal
+/// sensitivity becomes common-mode.
 ///
-/// Read the Ratio column against the 'before' row. Below 1.00 is an improvement. Treat anything
-/// inside the error margin as no result rather than a small win.
+/// WHAT THIS DOES NOT DO: BenchmarkDotNet runs each case in its own process, sequentially, not as
+/// interleaved invocations. With the default orderer a before/after pair is adjacent, but the
+/// first block still warms the package for the second. The bias therefore runs one way, mid-session
+/// 'after' tends to run hotter than 'before', which understates wins and overstates regressions.
+/// That is conservative for accepting an improvement, but for a borderline regression confirm with
+/// a swapped-order run before believing it. Pinning clocks (turbo off, AC power, max processor
+/// state 99%) removes most of this and is worth doing for any decision run.
+///
+/// Read the Ratio column against the 'before' row. Below 1.00 is an improvement. The run prints an
+/// explicit per-size verdict afterwards; prefer that to eyeballing the table.
 /// </summary>
 public class OptimizationBenchmarks
 {
     private byte[] _data = null!;
 
-    [Params(4, 128, 1_024, 1_025, 4_095, 4_096, 4_097, 8_192, 16_384, 65_536, 73_729, 131_072)]
+    // Includes 1 MB and 10 MB: subtree scheduling and parent-reduction changes land in the
+    // multithreaded band, so leaving the decision run at 128 KB would give the largest planned
+    // changes no before/after coverage at all.
+    [Params(4, 128, 1_024, 1_025, 4_095, 4_096, 4_097, 8_192, 16_384, 65_536, 73_729, 131_072, 1_048_576, 10_485_760)]
     public int Data_Size;
 
     [GlobalSetup]

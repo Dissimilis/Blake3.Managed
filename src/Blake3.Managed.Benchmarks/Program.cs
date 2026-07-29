@@ -1,3 +1,5 @@
+extern alias Baseline;
+
 using System.Diagnostics;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
@@ -20,9 +22,14 @@ namespace Blake3.Managed.Benchmarks;
 ///   dotnet run -c Release -- --filter "*8192*"   any BenchmarkDotNet filter still works
 ///
 /// HOW TO READ A RESULT. The default run compares the frozen pre-optimization snapshot against
-/// the current build, alternating within one process. Read the Ratio column: below 1.00 is an
-/// improvement. Do NOT compare a Mean from one session against a Mean from another -- this
-/// machine throttles roughly 2x under sustained load.
+/// the current build. Read the per-size verdict printed after the table, not the table alone.
+/// Do NOT compare a Mean from one session against a Mean from another -- this machine throttles
+/// roughly 2x under sustained load.
+///
+/// BenchmarkDotNet runs every case in its own process, sequentially; the before/after pair is
+/// adjacent but not interleaved, so the earlier row runs on a slightly cooler package. That biases
+/// against 'after', which understates wins and overstates regressions. Pin clocks (turbo off, on
+/// AC, max processor state 99%) for any run you intend to act on.
 ///
 /// An earlier version of this harness claimed that ratios against the Rust reference cancelled
 /// thermal state out. That was wrong, and measurement showed it: across two sessions with no code
@@ -75,7 +82,98 @@ public static class Program
                     ? new[] { BenchmarkRunner.Run<ApiSurfaceBenchmarks>(config, passthrough) }
                     : new[] { BenchmarkRunner.Run<OptimizationBenchmarks>(config, passthrough) };
 
+        foreach (var summary in summaries)
+        {
+            PrintAbVerdicts(summary);
+        }
+
         return ReportOutcome(summaries);
+    }
+
+    /// <summary>
+    /// Turns the A/B table into an explicit answer. Without this, a run that never reached its
+    /// precision target still prints a crisp-looking Ratio, and a tired reader accepts a 3% "win"
+    /// that sits well inside a 6% error margin.
+    /// </summary>
+    private static void PrintAbVerdicts(Summary summary)
+    {
+        var pairs = summary.Reports
+            .Where(r => r.ResultStatistics is not null)
+            .Select(r => new
+            {
+                Report = r,
+                Size = r.BenchmarkCase.Parameters.Items.FirstOrDefault(p => p.Name == "Data_Size")?.Value,
+                // Match on the method name, not the [Benchmark(Description)] text: the display
+                // info is not guaranteed to carry the description, and a silently unmatched pair
+                // means no verdict prints at all.
+                Display = r.BenchmarkCase.Descriptor.WorkloadMethod.Name,
+            })
+            .Where(x => x.Size is not null
+                        && (x.Display.StartsWith("Before", StringComparison.Ordinal)
+                            || x.Display.StartsWith("After", StringComparison.Ordinal)))
+            .GroupBy(x => (
+                Size: Convert.ToInt64(x.Size),
+                Variant: x.Display.StartsWith("Before", StringComparison.Ordinal)
+                    ? x.Display["Before".Length..]
+                    : x.Display["After".Length..]))
+            .Where(g => g.Count() == 2)
+            .OrderBy(g => g.Key.Variant)
+            .ThenBy(g => g.Key.Size)
+            .ToList();
+
+        if (pairs.Count == 0) return;
+
+        Console.WriteLine();
+        Console.WriteLine("A/B verdict (before = frozen baseline, after = current build)");
+        Console.WriteLine("-------------------------------------------------------------");
+
+        foreach (var pair in pairs)
+        {
+            var before = pair.First(x => x.Display.StartsWith("Before", StringComparison.Ordinal)).Report;
+            var after = pair.First(x => x.Display.StartsWith("After", StringComparison.Ordinal)).Report;
+
+            var beforeStats = before.ResultStatistics!;
+            var afterStats = after.ResultStatistics!;
+
+            double ratio = afterStats.Mean / beforeStats.Mean;
+            double changePercent = (ratio - 1.0) * 100.0;
+
+            // Achieved precision, not the precision we asked for. A run capped at MaxIterationCount
+            // can finish far from the 1% target while the summary table still looks authoritative.
+            double beforeError = beforeStats.StandardError / beforeStats.Mean * 100.0;
+            double afterError = afterStats.StandardError / afterStats.Mean * 100.0;
+            double worstError = Math.Max(beforeError, afterError);
+
+            bool intervalsOverlap =
+                beforeStats.ConfidenceInterval.Lower <= afterStats.ConfidenceInterval.Upper
+                && afterStats.ConfidenceInterval.Lower <= beforeStats.ConfidenceInterval.Upper;
+
+            string verdict;
+            if (worstError > 2.0)
+            {
+                verdict = $"NO RESULT (noisy: +/-{worstError:F1}%)";
+            }
+            else if (intervalsOverlap)
+            {
+                verdict = "NO RESULT (confidence intervals overlap)";
+            }
+            else if (changePercent < 0)
+            {
+                verdict = $"IMPROVED {-changePercent:F1}%";
+            }
+            else
+            {
+                verdict = $"REGRESSED {changePercent:F1}%";
+            }
+
+            Console.WriteLine($"  {pair.Key.Variant,-28} {pair.Key.Size,10:N0} B  ratio {ratio:F3}  {verdict}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  NO RESULT means the run cannot support a claim either way -- it does not mean");
+        Console.WriteLine("  'no change'. Re-run with clocks pinned, or accept that the effect is below");
+        Console.WriteLine("  this machine's resolution.");
+        Console.WriteLine();
     }
 
     private static bool IsOurFlag(string arg) =>
@@ -159,9 +257,38 @@ public static class Program
     private static void PrintProvenance()
     {
         Console.WriteLine($"Blake3.Managed benchmark suite  |  commit {GitDescribe()}  |  {DateTime.Now:yyyy-MM-dd HH:mm}");
-        Console.WriteLine("Decision metric: Ratio vs the frozen baseline build, measured in this same process.");
+        Console.WriteLine("Decision metric: current build vs the frozen baseline build, in this same run.");
         Console.WriteLine("Absolute nanoseconds are NOT comparable across sessions (this machine throttles ~2x).");
+        VerifyBaselineIsDistinct();
         Console.WriteLine();
+    }
+
+    /// <summary>
+    /// Proves the two A/B rows really are two different builds.
+    /// </summary>
+    /// <remarks>
+    /// This is the harness's most plausible silent lie: if a future edit points both rows at the
+    /// same hasher, or the frozen snapshot is accidentally refreshed, every ratio pins near 1.00
+    /// and reads as "the optimization did nothing" -- indistinguishable from a real null result,
+    /// and no test fails. Assert the identity rather than trusting a README not to drift.
+    /// </remarks>
+    private static void VerifyBaselineIsDistinct()
+    {
+        var current = typeof(Blake3.Managed.Hasher).Assembly;
+        var baseline = typeof(Baseline::Blake3.Managed.Hasher).Assembly;
+
+        var currentName = current.GetName().Name;
+        var baselineName = baseline.GetName().Name;
+
+        if (currentName == baselineName || ReferenceEquals(current, baseline))
+        {
+            throw new InvalidOperationException(
+                $"A/B control is broken: both rows resolve to assembly '{currentName}'. "
+                + "The comparison would report ~1.00 regardless of any optimization.");
+        }
+
+        var baselineFile = baseline.Location.Length > 0 ? Path.GetFileName(baseline.Location) : "in-memory";
+        Console.WriteLine($"A/B control: current='{currentName}' vs baseline='{baselineName}' ({baselineFile})");
     }
 
     private static string GitDescribe()
