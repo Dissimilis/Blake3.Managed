@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Frozen copy of Blake3.Managed, compiled under a DIFFERENT assembly name so that the
+    benchmark process can load the old and the new implementation side by side and measure
+    them back to back in one session.
+
+    Why a source copy rather than the shipped NuGet package: the package and the project both
+    produce an assembly with the simple name "Blake3.Managed", and the default
+    AssemblyLoadContext refuses to load two assemblies with the same simple name. An extern
+    alias fixes compilation but not loading. Renaming the assembly here sidesteps that, and
+    keeps the benchmarked calls ordinary statically compiled calls (no reflection, no
+    AssemblyLoadContext marshalling), so small-input measurements stay meaningful.
+
+    Namespaces and types are intentionally left identical to the real library; the benchmark
+    project disambiguates with an extern alias (Aliases="Baseline" on its ProjectReference).
+
+    See README.md in this folder for how to refresh the snapshot.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Blake3.Managed.Baseline</AssemblyName>
+    <RootNamespace>Blake3.Managed</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Generated snapshot: do not fail the build on doc comments or analyzer nits here. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

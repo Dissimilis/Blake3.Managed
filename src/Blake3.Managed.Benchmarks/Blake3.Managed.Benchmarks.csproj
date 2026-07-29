@@ -9,11 +9,24 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
-    <PackageReference Include="Blake3" />
+    <!-- Blake3 3.x is xoofx's pure-managed implementation; Blake3.Native is the Rust FFI.
+         Both define Blake3.Hasher, so the managed one is aliased to keep them apart. -->
+    <PackageReference Include="Blake3" Aliases="XoofxManaged" />
+    <PackageReference Include="Blake3.Native" />
+    <PackageReference Include="CryptoHives.Foundation.Security.Cryptography" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Blake3.Managed\Blake3.Managed.csproj" />
+    <!-- Frozen pre-optimization snapshot, compiled as Blake3.Managed.Baseline so both can load. -->
+    <ProjectReference Include="..\Blake3.Managed.Baseline\Blake3.Managed.Baseline.csproj" Aliases="Baseline" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Official BLAKE3 vectors: ground truth for the pre-benchmark correctness gate. -->
+    <None Include="..\Blake3.Managed.Tests\TestVectors.json" Link="TestVectors.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
