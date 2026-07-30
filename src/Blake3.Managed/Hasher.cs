@@ -41,6 +41,12 @@ public unsafe struct Hasher : IDisposable
         {
             Blake3Core.HashOneChunkRoot32(Blake3Constants.IV, 0, 0, hash.AsSpan(), input);
         }
+        else if (input.Length <= Blake3Tree.MaxUsefulLength)
+        {
+            // Wide-frontier tree: compresses parents in batches instead of one at a time. Only
+            // used below the size where the thread-pool path takes over.
+            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
+        }
         else
         {
             var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
@@ -63,6 +69,10 @@ public unsafe struct Hasher : IDisposable
         if (input.Length <= Blake3Constants.ChunkLen && output.Length <= 64)
         {
             Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
+        }
+        else if (input.Length > Blake3Constants.ChunkLen && input.Length <= Blake3Tree.MaxUsefulLength)
+        {
+            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
         }
         else
         {
