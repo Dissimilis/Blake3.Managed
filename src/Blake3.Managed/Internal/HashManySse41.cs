@@ -119,10 +119,10 @@ internal static class HashManySse41
             (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
             (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32));
 
-        var ivVec0 = Vector128.Create(Blake3Constants.IV[0]);
-        var ivVec1 = Vector128.Create(Blake3Constants.IV[1]);
-        var ivVec2 = Vector128.Create(Blake3Constants.IV[2]);
-        var ivVec3 = Vector128.Create(Blake3Constants.IV[3]);
+        var ivVec0 = Vector128.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector128.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector128.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector128.Create(Blake3Constants.Iv3);
         var blockLenVec = Vector128.Create((uint)Blake3Constants.BlockLen);
 
         fixed (byte* chunksPtr = chunks)

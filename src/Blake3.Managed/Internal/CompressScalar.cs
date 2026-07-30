@@ -51,10 +51,10 @@ internal static class CompressScalar
     {
         uint s0 = cv[0], s1 = cv[1], s2 = cv[2], s3 = cv[3];
         uint s4 = cv[4], s5 = cv[5], s6 = cv[6], s7 = cv[7];
-        uint s8 = Blake3Constants.IV[0];
-        uint s9 = Blake3Constants.IV[1];
-        uint s10 = Blake3Constants.IV[2];
-        uint s11 = Blake3Constants.IV[3];
+        uint s8 = Blake3Constants.Iv0;
+        uint s9 = Blake3Constants.Iv1;
+        uint s10 = Blake3Constants.Iv2;
+        uint s11 = Blake3Constants.Iv3;
         uint s12 = (uint)counter;
         uint s13 = (uint)(counter >> 32);
         uint s14 = blockLen;

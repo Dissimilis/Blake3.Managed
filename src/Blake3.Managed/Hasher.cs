@@ -35,7 +35,11 @@ public unsafe struct Hasher : IDisposable
     {
         // Written directly into the returned value: the previous shape produced 64 root bytes,
         // copied 32 into a stack buffer, then copied those 32 again into the Hash.
-        var hash = new Blake3.Managed.Hash();
+        //
+        // SkipInit rather than `new Hash()`: every path below writes all 32 bytes, so zero-
+        // initialising first is 32 bytes of stores that are immediately overwritten. That is
+        // measurable when the whole call is under 100 ns.
+        Unsafe.SkipInit(out Blake3.Managed.Hash hash);
 
         if (input.Length <= Blake3Constants.ChunkLen)
         {

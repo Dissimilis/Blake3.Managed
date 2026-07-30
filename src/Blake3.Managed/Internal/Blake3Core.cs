@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace Blake3.Managed.Internal;
@@ -67,10 +68,43 @@ internal static class Blake3Core
     /// written into the caller's buffer with no intermediate copy at all.
     /// </remarks>
     [SkipLocalsInit]
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void HashOneChunkRoot32(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags,
         Span<byte> output, ReadOnlySpan<byte> input)
     {
+        Span<byte> lastBlock = stackalloc byte[Blake3Constants.BlockLen];
+
+        if (input.Length <= Blake3Constants.BlockLen)
+        {
+            // One block, which is the overwhelmingly common short-input case. No compression has
+            // happened yet, so the chaining value is still the key and can be passed straight
+            // through -- there is no scratch CV to allocate and copy the key into.
+            //
+            // A full 64-byte block needs no padding, so it is compressed where it lies. Only a
+            // partial block is copied into scratch and zero-padded.
+            uint singleFlags = flags | Blake3Constants.ChunkStart
+                               | Blake3Constants.ChunkEnd | Blake3Constants.Root;
+
+            if (input.Length == Blake3Constants.BlockLen)
+            {
+                RootBlockTo32(key, input, chunkCounter, (uint)input.Length, singleFlags, flags, output);
+                return;
+            }
+
+            ZeroBlock(lastBlock);
+            CopyUpTo64(input, lastBlock);
+            RootBlockTo32(key, lastBlock, chunkCounter, (uint)input.Length, singleFlags, flags, output);
+            return;
+        }
+
+        if (CompressSse41.IsSupported && flags == 0 && chunkCounter == 0)
+        {
+            // Multi-block default unkeyed chunk: the fused loop keeps the chaining value in
+            // registers across every block instead of round-tripping it through memory. Placed
+            // after the single-block case, which has a cheaper constant-state path of its own.
+            CompressSse41.HashChunkRoot32Iv(input, MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
+
         Span<uint> cv = stackalloc uint[8];
         key[..8].CopyTo(cv);
 
@@ -86,30 +120,131 @@ internal static class Blake3Core
             blocksCompressed++;
         }
 
-        Span<byte> lastBlock = stackalloc byte[Blake3Constants.BlockLen];
-        lastBlock.Clear();
+        // Same again for the tail: an input that is an exact multiple of the block size ends on a
+        // full block, which needs neither zeroing nor copying.
         int remaining = input.Length - pos;
-        if (remaining > 0)
-            input.Slice(pos, remaining).CopyTo(lastBlock);
+        uint tailFlags = flags | Blake3Constants.ChunkEnd | Blake3Constants.Root;
 
-        ReadOnlySpan<uint> lastBlockWords = MemoryMarshal.Cast<byte, uint>(lastBlock);
-        uint lastFlags = flags | Blake3Constants.ChunkEnd | Blake3Constants.Root
-                         | (blocksCompressed == 0 ? Blake3Constants.ChunkStart : 0u);
-
-        if (BitConverter.IsLittleEndian)
+        if (remaining == Blake3Constants.BlockLen)
         {
-            // Compress straight into the destination; the words are already little-endian.
-            CompressCv(cv, lastBlockWords, chunkCounter, (uint)remaining, lastFlags,
+            StoreRoot32(cv, input.Slice(pos), chunkCounter, (uint)remaining, tailFlags, output);
+            return;
+        }
+
+        ZeroBlock(lastBlock);
+        CopyUpTo64(input.Slice(pos, remaining), lastBlock);
+        StoreRoot32(cv, lastBlock, chunkCounter, (uint)remaining, tailFlags, output);
+    }
+
+    /// <summary>
+    /// Emits the 32 root bytes for a single-block chunk, taking the specialised constant-state
+    /// path when this is a default unkeyed hash.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void RootBlockTo32(ReadOnlySpan<uint> key, ReadOnlySpan<byte> block,
+        ulong chunkCounter, uint blockLen, uint blockFlags, uint baseFlags, Span<byte> output)
+    {
+        if (CompressSse41.IsSupported && baseFlags == 0 && chunkCounter == 0)
+        {
+            // Default unkeyed hash: rows 0-2 are the IV and the counter is zero, so the whole
+            // compression state is constant apart from the message.
+            CompressSse41.CompressRootIvSingleBlock(
+                MemoryMarshal.Cast<byte, uint>(block), blockLen,
                 MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
+
+        StoreRoot32(key, block, chunkCounter, blockLen, blockFlags, output);
+    }
+
+    /// <summary>
+    /// Copies 1..63 bytes without leaving the caller's code.
+    /// </summary>
+    /// <remarks>
+    /// Span.CopyTo bottoms out in Buffer.Memmove, an out-of-line call with its own size dispatch.
+    /// For a 4-byte hash that call is a visible share of the total. The overlapping-load ladder
+    /// below is the standard small-copy shape and compiles to a couple of instructions per case.
+    /// The destination is already zeroed, so writing past the source length is not a concern --
+    /// but every write here stays within the copied region anyway.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyUpTo64(ReadOnlySpan<byte> src, Span<byte> dst)
+    {
+        int n = src.Length;
+        ref byte s = ref MemoryMarshal.GetReference(src);
+        ref byte d = ref MemoryMarshal.GetReference(dst);
+
+        if (n >= 32)
+        {
+            Unsafe.WriteUnaligned(ref d, Unsafe.ReadUnaligned<Vector128<byte>>(ref s));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, 16), Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref s, 16)));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, n - 32), Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref s, n - 32)));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, n - 16), Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref s, n - 16)));
+        }
+        else if (n >= 16)
+        {
+            Unsafe.WriteUnaligned(ref d, Unsafe.ReadUnaligned<Vector128<byte>>(ref s));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, n - 16), Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref s, n - 16)));
+        }
+        else if (n >= 8)
+        {
+            Unsafe.WriteUnaligned(ref d, Unsafe.ReadUnaligned<ulong>(ref s));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, n - 8), Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref s, n - 8)));
+        }
+        else if (n >= 4)
+        {
+            Unsafe.WriteUnaligned(ref d, Unsafe.ReadUnaligned<uint>(ref s));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, n - 4), Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref s, n - 4)));
         }
         else
         {
-            Span<uint> words = stackalloc uint[8];
-            CompressCv(cv, lastBlockWords, chunkCounter, (uint)remaining, lastFlags, words);
-            for (int i = 0; i < 8; i++)
+            for (int i = 0; i < n; i++)
             {
-                BinaryPrimitives.WriteUInt32LittleEndian(output.Slice(i * 4), words[i]);
+                Unsafe.Add(ref d, i) = Unsafe.Add(ref s, i);
             }
+        }
+    }
+
+    /// <summary>
+    /// Zeroes a 64-byte block with inline stores.
+    /// </summary>
+    /// <remarks>
+    /// Span.Clear() is an out-of-line memset call. That is the right choice for large buffers and
+    /// the wrong one here: the whole short-input hash is under 100 ns, so a call plus its
+    /// size-dispatch costs a visible fraction of it. Four 128-bit stores have no call at all.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ZeroBlock(Span<byte> block)
+    {
+        ref byte dst = ref MemoryMarshal.GetReference(block);
+        Unsafe.WriteUnaligned(ref dst, default(Vector128<byte>));
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 16), default(Vector128<byte>));
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 32), default(Vector128<byte>));
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 48), default(Vector128<byte>));
+    }
+
+    /// <summary>
+    /// Compresses the final block and writes the 32 root bytes, in little-endian order.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void StoreRoot32(ReadOnlySpan<uint> cv, ReadOnlySpan<byte> block,
+        ulong chunkCounter, uint blockLen, uint flags, Span<byte> output)
+    {
+        ReadOnlySpan<uint> blockWords = MemoryMarshal.Cast<byte, uint>(block);
+
+        if (BitConverter.IsLittleEndian)
+        {
+            // Straight into the destination; the words are already in the right byte order.
+            CompressCv(cv, blockWords, chunkCounter, blockLen, flags,
+                MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
+
+        Span<uint> words = stackalloc uint[8];
+        CompressCv(cv, blockWords, chunkCounter, blockLen, flags, words);
+        for (int i = 0; i < 8; i++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(output.Slice(i * 4), words[i]);
         }
     }
 
