@@ -33,19 +33,23 @@ public unsafe struct Hasher : IDisposable
     [SkipLocalsInit]
     public static Hash Hash(ReadOnlySpan<byte> input)
     {
-        Span<byte> bytes = stackalloc byte[Blake3.Managed.Hash.Size];
+        // Written directly into the returned value: the previous shape produced 64 root bytes,
+        // copied 32 into a stack buffer, then copied those 32 again into the Hash.
+        var hash = new Blake3.Managed.Hash();
+
         if (input.Length <= Blake3Constants.ChunkLen)
         {
-            Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, bytes, input);
+            Blake3Core.HashOneChunkRoot32(Blake3Constants.IV, 0, 0, hash.AsSpan(), input);
         }
         else
         {
             var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
             state.UpdateWithJoin(input);
             var output = state.Finalize();
-            output.RootOutputBytes(bytes);
+            output.RootOutputBytes(hash.AsSpan());
         }
-        return Blake3.Managed.Hash.FromBytes(bytes);
+
+        return hash;
     }
 
     /// <summary>

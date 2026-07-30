@@ -56,6 +56,63 @@ internal static class Blake3Core
             flags | Blake3Constants.ChunkEnd, cv);
     }
 
+    /// <summary>
+    /// Hashes a single chunk straight into a 32-byte destination.
+    /// </summary>
+    /// <remarks>
+    /// The default one-shot case. The general path computes all 16 root words, copies 32 of the
+    /// 64 resulting bytes into a scratch buffer, and copies them again into the returned Hash.
+    /// None of that is needed for a 32-byte digest: the root output's first eight words are
+    /// exactly the chaining value, so CompressCv produces the answer directly, and it can be
+    /// written into the caller's buffer with no intermediate copy at all.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void HashOneChunkRoot32(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags,
+        Span<byte> output, ReadOnlySpan<byte> input)
+    {
+        Span<uint> cv = stackalloc uint[8];
+        key[..8].CopyTo(cv);
+
+        int pos = 0;
+        int blocksCompressed = 0;
+
+        while (pos + Blake3Constants.BlockLen < input.Length)
+        {
+            ReadOnlySpan<uint> blockWords = MemoryMarshal.Cast<byte, uint>(input.Slice(pos, Blake3Constants.BlockLen));
+            uint blockFlags = flags | (blocksCompressed == 0 ? Blake3Constants.ChunkStart : 0u);
+            CompressCv(cv, blockWords, chunkCounter, Blake3Constants.BlockLen, blockFlags, cv);
+            pos += Blake3Constants.BlockLen;
+            blocksCompressed++;
+        }
+
+        Span<byte> lastBlock = stackalloc byte[Blake3Constants.BlockLen];
+        lastBlock.Clear();
+        int remaining = input.Length - pos;
+        if (remaining > 0)
+            input.Slice(pos, remaining).CopyTo(lastBlock);
+
+        ReadOnlySpan<uint> lastBlockWords = MemoryMarshal.Cast<byte, uint>(lastBlock);
+        uint lastFlags = flags | Blake3Constants.ChunkEnd | Blake3Constants.Root
+                         | (blocksCompressed == 0 ? Blake3Constants.ChunkStart : 0u);
+
+        if (BitConverter.IsLittleEndian)
+        {
+            // Compress straight into the destination; the words are already little-endian.
+            CompressCv(cv, lastBlockWords, chunkCounter, (uint)remaining, lastFlags,
+                MemoryMarshal.Cast<byte, uint>(output));
+        }
+        else
+        {
+            Span<uint> words = stackalloc uint[8];
+            CompressCv(cv, lastBlockWords, chunkCounter, (uint)remaining, lastFlags, words);
+            for (int i = 0; i < 8; i++)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(output.Slice(i * 4), words[i]);
+            }
+        }
+    }
+
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void HashOneChunk(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags, Span<byte> output, ReadOnlySpan<byte> input)
@@ -316,17 +373,20 @@ internal static class Blake3Core
         private ChunkState _chunkState;
         private readonly uint _flags;
 
-        // A complete chunk's CV produced by a SIMD batch that has NOT yet been merged into the
+        // Set when a complete chunk's CV from a SIMD batch has not yet been merged into the
         // stack, because it may turn out to be the final chunk.
         //
         // Finalize needs the last chunk's chaining value as the right child of the root parent.
         // It used to obtain that by re-running the whole chunk through _chunkState -- 16 further
         // compressions to recompute a value the SIMD kernel had already produced and discarded.
-        // Holding the CV here instead defers the decision: if more input arrives it is merged
-        // normally, and if not, Finalize consumes it directly.
-        private unsafe fixed uint _pendingCv[8];
+        // Deferring instead: if more input arrives the CV is merged normally, and if not,
+        // Finalize consumes it directly.
+        //
+        // The CV lives in the first unused CV-stack slot rather than its own buffer, and its
+        // chunk count is always _chunkState.ChunkCounter. Both details keep HasherState the same
+        // size as before: this struct is created per hash, so growing it cost measurably more on
+        // small inputs than the deferral saved.
         private bool _hasPendingCv;
-        private ulong _pendingCvTotalChunks;
 
         public HasherState(ReadOnlySpan<uint> key, uint flags)
         {
@@ -335,18 +395,16 @@ internal static class Blake3Core
             _cvStackLen = 0;
             _flags = flags;
             _hasPendingCv = false;
-            _pendingCvTotalChunks = 0;
             key[..8].CopyTo(KeySpan);
             _chunkState = new ChunkState(key, 0, flags);
         }
 
-        private unsafe Span<uint> PendingCvSpan
+        // The slot one past the top of the stack: unused until the next PushCv, which cannot
+        // happen while a CV is deferred.
+        private Span<uint> PendingCvSpan
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get
-            {
-                fixed (uint* p = _pendingCv) return new Span<uint>(p, 8);
-            }
+            get => CvStackSpan.Slice(_cvStackLen * 8, 8);
         }
 
         /// <summary>
@@ -359,7 +417,7 @@ internal static class Blake3Core
             if (!_hasPendingCv) return;
 
             _hasPendingCv = false;
-            AddChunkCv(PendingCvSpan, _pendingCvTotalChunks);
+            AddChunkCv(PendingCvSpan, _chunkState.ChunkCounter);
         }
 
         /// <summary>
@@ -372,10 +430,9 @@ internal static class Blake3Core
         /// the chunk itself, which needs its pre-final-block state and not just its CV.
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void DeferChunkCv(ReadOnlySpan<uint> cv, ulong totalChunks)
+        private void DeferChunkCv(ReadOnlySpan<uint> cv)
         {
             cv.Slice(0, 8).CopyTo(PendingCvSpan);
-            _pendingCvTotalChunks = totalChunks;
             _hasPendingCv = true;
         }
 
@@ -520,7 +577,7 @@ internal static class Blake3Core
                     {
                         // Input ends exactly on the batch boundary. The 8th chunk's CV is already
                         // in batchCvs; defer it rather than re-hashing those 1024 bytes.
-                        DeferChunkCv(batchCvs.Slice(7 * 8, 8), startCounter + 8);
+                        DeferChunkCv(batchCvs.Slice(7 * 8, 8));
                     }
 
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 8);
@@ -553,7 +610,7 @@ internal static class Blake3Core
                     {
                         // Input ends exactly on the batch boundary; the 4th chunk's CV is already
                         // in batchCvs. Same deferral as the 8-way path above.
-                        DeferChunkCv(batchCvs.Slice(3 * 8, 8), startCounter + 4);
+                        DeferChunkCv(batchCvs.Slice(3 * 8, 8));
                     }
 
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 4);
@@ -585,10 +642,8 @@ internal static class Blake3Core
         {
             const int chunkLen = Blake3Constants.ChunkLen;
 
-            if (input.Length == 0) return;
-
             // As in Update: new input means a deferred chunk is not the last one.
-            FlushPendingCv();
+            if (_hasPendingCv) FlushPendingCv();
             const int subtreeChunks = 64;
             const int subtreeLen = subtreeChunks * chunkLen;
 
@@ -700,6 +755,14 @@ internal static class Blake3Core
         [SkipLocalsInit]
         public Output Finalize()
         {
+            // Single-chunk input: the chunk itself is the root. Handled before anything else so
+            // this path touches no stack buffers and no tree state -- it is the whole cost of
+            // hashing a short string, and an extra stackalloc above it was measurable.
+            if (!_hasPendingCv && _cvStackLen == 0)
+            {
+                return _chunkState.CreateOutput();
+            }
+
             Span<uint> chunkCv = stackalloc uint[8];
 
             if (_hasPendingCv && _chunkState.Len == 0)
