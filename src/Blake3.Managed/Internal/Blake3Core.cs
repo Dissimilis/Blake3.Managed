@@ -71,28 +71,37 @@ internal static class Blake3Core
     internal static void HashOneChunkRoot32(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags,
         Span<byte> output, ReadOnlySpan<byte> input)
     {
-        Span<byte> lastBlock = stackalloc byte[Blake3Constants.BlockLen];
-
         if (input.Length <= Blake3Constants.BlockLen)
         {
-            // One block, which is the overwhelmingly common short-input case. No compression has
-            // happened yet, so the chaining value is still the key and can be passed straight
-            // through -- there is no scratch CV to allocate and copy the key into.
-            //
-            // A full 64-byte block needs no padding, so it is compressed where it lies. Only a
-            // partial block is copied into scratch and zero-padded.
+            // One block, which is the overwhelmingly common short-input case.
+            if (CompressSse41.IsSupported && flags == 0 && chunkCounter == 0)
+            {
+                // Default unkeyed hash: every compression state row except the message and the
+                // block length is a compile-time constant, and the message is assembled in
+                // registers, so this touches no scratch memory at all.
+                CompressSse41.CompressRootIvSingleBlock(input, MemoryMarshal.Cast<byte, uint>(output));
+                return;
+            }
+
+            // Keyed, derive-key, or no SSE: the generic compressor needs a padded block. No
+            // compression has happened yet, so the chaining value is still the key and is passed
+            // straight through rather than copied into a scratch buffer.
             uint singleFlags = flags | Blake3Constants.ChunkStart
                                | Blake3Constants.ChunkEnd | Blake3Constants.Root;
 
             if (input.Length == Blake3Constants.BlockLen)
             {
-                RootBlockTo32(key, input, chunkCounter, (uint)input.Length, singleFlags, flags, output);
+                StoreRoot32(key, input, chunkCounter, (uint)input.Length, singleFlags, output);
                 return;
             }
 
-            ZeroBlock(lastBlock);
-            CopyUpTo64(input, lastBlock);
-            RootBlockTo32(key, lastBlock, chunkCounter, (uint)input.Length, singleFlags, flags, output);
+            // Scratch is declared here, not at the top of the method: the fast paths above never
+            // touch it, and hoisting it made every short hash carry the frame for a buffer it
+            // did not use.
+            Span<byte> padded = stackalloc byte[Blake3Constants.BlockLen];
+            ZeroBlock(padded);
+            CopyUpTo64(input, padded);
+            StoreRoot32(key, padded, chunkCounter, (uint)input.Length, singleFlags, output);
             return;
         }
 
@@ -131,30 +140,10 @@ internal static class Blake3Core
             return;
         }
 
+        Span<byte> lastBlock = stackalloc byte[Blake3Constants.BlockLen];
         ZeroBlock(lastBlock);
         CopyUpTo64(input.Slice(pos, remaining), lastBlock);
         StoreRoot32(cv, lastBlock, chunkCounter, (uint)remaining, tailFlags, output);
-    }
-
-    /// <summary>
-    /// Emits the 32 root bytes for a single-block chunk, taking the specialised constant-state
-    /// path when this is a default unkeyed hash.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void RootBlockTo32(ReadOnlySpan<uint> key, ReadOnlySpan<byte> block,
-        ulong chunkCounter, uint blockLen, uint blockFlags, uint baseFlags, Span<byte> output)
-    {
-        if (CompressSse41.IsSupported && baseFlags == 0 && chunkCounter == 0)
-        {
-            // Default unkeyed hash: rows 0-2 are the IV and the counter is zero, so the whole
-            // compression state is constant apart from the message.
-            CompressSse41.CompressRootIvSingleBlock(
-                MemoryMarshal.Cast<byte, uint>(block), blockLen,
-                MemoryMarshal.Cast<byte, uint>(output));
-            return;
-        }
-
-        StoreRoot32(key, block, chunkCounter, blockLen, blockFlags, output);
     }
 
     /// <summary>

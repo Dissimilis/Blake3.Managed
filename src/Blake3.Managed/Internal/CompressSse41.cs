@@ -60,6 +60,67 @@ internal static class CompressSse41
     }
 
     /// <summary>
+    /// Builds the four message vectors of a zero-padded block of 0..64 bytes, entirely in
+    /// registers.
+    /// </summary>
+    /// <remarks>
+    /// The obvious implementation zeroes a 64-byte stack buffer, copies the input over the front
+    /// of it, then loads it back as four vectors. That load overlaps both a 16-byte zeroing store
+    /// and a narrower data store, which defeats store-to-load forwarding and stalls. Assembling
+    /// the words directly avoids the round trip: for a 4-byte input this is one 32-bit load and
+    /// three zero vectors.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void LoadPaddedBlock(ReadOnlySpan<byte> src,
+        out Vector128<uint> m0, out Vector128<uint> m1,
+        out Vector128<uint> m2, out Vector128<uint> m3)
+    {
+        int n = src.Length;
+        ref byte s = ref MemoryMarshal.GetReference(src);
+        m0 = LoadLane(ref s, 0, n);
+        m1 = LoadLane(ref s, 16, n);
+        m2 = LoadLane(ref s, 32, n);
+        m3 = LoadLane(ref s, 48, n);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<uint> LoadLane(ref byte s, int offset, int length)
+    {
+        if (offset + 16 <= length)
+        {
+            return Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref s, offset));
+        }
+
+        if (offset >= length)
+        {
+            return Vector128<uint>.Zero;
+        }
+
+        int available = length - offset;
+        return Vector128.Create(
+            LoadWord(ref s, offset, available),
+            LoadWord(ref s, offset + 4, available - 4),
+            LoadWord(ref s, offset + 8, available - 8),
+            LoadWord(ref s, offset + 12, available - 12));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint LoadWord(ref byte s, int offset, int available)
+    {
+        if (available >= 4)
+        {
+            return Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref s, offset));
+        }
+
+        uint value = 0;
+        for (int i = 0; i < available; i++)
+        {
+            value |= (uint)Unsafe.Add(ref s, offset + i) << (i * 8);
+        }
+        return value;
+    }
+
+    /// <summary>
     /// Hashes a whole chunk (0..1024 bytes) in default unkeyed mode, producing the 32-byte digest.
     /// </summary>
     /// <remarks>
@@ -122,18 +183,7 @@ internal static class CompressSse41
         }
         else
         {
-            Span<byte> padded = stackalloc byte[Blake3Constants.BlockLen];
-            ref byte d = ref MemoryMarshal.GetReference(padded);
-            Unsafe.WriteUnaligned(ref d, default(Vector128<byte>));
-            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, 16), default(Vector128<byte>));
-            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, 32), default(Vector128<byte>));
-            Unsafe.WriteUnaligned(ref Unsafe.Add(ref d, 48), default(Vector128<byte>));
-            input.Slice(pos, lastLen).CopyTo(padded);
-
-            m0 = Unsafe.ReadUnaligned<Vector128<uint>>(ref d);
-            m1 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref d, 16));
-            m2 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref d, 32));
-            m3 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref d, 48));
+            LoadPaddedBlock(input.Slice(pos, lastLen), out m0, out m1, out m2, out m3);
         }
 
         var f0 = cv0;
@@ -160,9 +210,9 @@ internal static class CompressSse41
     /// </remarks>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    public static void CompressRootIvSingleBlock(ReadOnlySpan<uint> block, uint blockLen,
-                                                 Span<uint> chainingValue)
+    public static void CompressRootIvSingleBlock(ReadOnlySpan<byte> input, Span<uint> chainingValue)
     {
+        uint blockLen = (uint)input.Length;
         var row0 = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
             Blake3Constants.Iv2, Blake3Constants.Iv3);
         var row1 = Vector128.Create(Blake3Constants.Iv4, Blake3Constants.Iv5,
@@ -171,11 +221,7 @@ internal static class CompressSse41
         var row3 = Vector128.Create(0u, 0u, blockLen,
             Blake3Constants.ChunkStart | Blake3Constants.ChunkEnd | Blake3Constants.Root);
 
-        ref uint mRef = ref MemoryMarshal.GetReference(block);
-        var m0 = VectorCompat.Load(ref mRef);
-        var m1 = VectorCompat.Load(ref mRef, 4);
-        var m2 = VectorCompat.Load(ref mRef, 8);
-        var m3 = VectorCompat.Load(ref mRef, 12);
+        LoadPaddedBlock(input, out var m0, out var m1, out var m2, out var m3);
 
         DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3, m0, m1, m2, m3);
 
