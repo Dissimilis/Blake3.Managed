@@ -153,6 +153,15 @@ public class CompetitiveBenchmarks
         hasher.Finalize(hash);
         return hash[0];
     }
+
+    // Not a BLAKE3 rival, but the reference most readers actually have intuition for.
+    [Benchmark(Description = "SHA256 [serial]")]
+    public byte Sha256()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(_data, hash);
+        return hash[0];
+    }
 }
 
 /// <summary>

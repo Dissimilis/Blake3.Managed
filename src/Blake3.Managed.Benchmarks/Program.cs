@@ -18,6 +18,7 @@ namespace Blake3.Managed.Benchmarks;
 ///   dotnet run -c Release -- --competitive   where we stand against native / xoofx / CryptoHives
 ///   dotnet run -c Release -- --api           our own API surfaces against each other
 ///   dotnet run -c Release -- --all           everything
+///   dotnet run -c Release -- --report        breadth for reporting (README numbers)
 ///   dotnet run -c Release -- --quick         smoke test only -- see the warning below
 ///   dotnet run -c Release -- --filter "*8192*"   any BenchmarkDotNet filter still works
 ///
@@ -45,6 +46,7 @@ public static class Program
         var flags = new HashSet<string>(args.Where(a => a.StartsWith("--")), StringComparer.OrdinalIgnoreCase);
         var passthrough = args.Where(a => !IsOurFlag(a)).ToArray();
         bool quick = flags.Contains("--quick");
+        bool report = flags.Contains("--report");
 
         PrintProvenance();
 
@@ -70,7 +72,7 @@ public static class Program
 
         Console.WriteLine();
 
-        var config = BuildConfig(quick);
+        var config = BuildConfig(quick, report);
 
         Summary[] summaries = flags.Contains("--all")
             ? BenchmarkRunner.Run(
@@ -180,7 +182,8 @@ public static class Program
         arg.Equals("--competitive", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--api", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--all", StringComparison.OrdinalIgnoreCase)
-        || arg.Equals("--quick", StringComparison.OrdinalIgnoreCase);
+        || arg.Equals("--quick", StringComparison.OrdinalIgnoreCase)
+        || arg.Equals("--report", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// A benchmark run that silently failed but exited 0 is worse than no run: it looks like a
@@ -214,7 +217,7 @@ public static class Program
         return 0;
     }
 
-    private static IConfig BuildConfig(bool quick)
+    private static IConfig BuildConfig(bool quick, bool report = false)
     {
         // Both jobs keep BenchmarkDotNet's pilot stage, which chooses the invocation count.
         // Job.Dry skips it and measures a single invocation, reporting error margins over 1000%.
@@ -223,6 +226,15 @@ public static class Program
         if (quick)
         {
             job = Job.ShortRun.WithWarmupCount(1).WithIterationCount(3).WithId("Smoke");
+        }
+        else if (report)
+        {
+            // For publishing a table across many sizes, where the useful precision is "which
+            // implementation is faster and roughly by how much" rather than "did this commit move
+            // it 5%". The Decide job below chases 1% relative error and needs about an hour for a
+            // 50-case sweep; this settles in minutes and reproduced the same ratios across
+            // sessions during development.
+            job = Job.ShortRun.WithWarmupCount(3).WithIterationCount(5).WithId("Report");
         }
         else
         {
