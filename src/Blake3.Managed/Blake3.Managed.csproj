@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Blake3.Managed.Tests" />
+    <InternalsVisibleTo Include="Blake3.Managed.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>

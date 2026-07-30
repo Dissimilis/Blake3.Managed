@@ -165,6 +165,70 @@ public class CompetitiveBenchmarks
 }
 
 /// <summary>
+/// Decides between two internal dispatch shapes for one-chunk inputs, in a single run so that
+/// thermal drift cannot favour either. Kept because the two candidates measured differently under
+/// BenchmarkDotNet than in a tight-loop harness, and only a same-run comparison settles it.
+/// </summary>
+public class DispatchBenchmarks
+{
+    private byte[] _data = null!;
+
+    [Params(4, 64, 128, 1_024)]
+    public int Data_Size;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _data = new byte[Data_Size];
+        new Random(2).NextBytes(_data);
+    }
+
+    // Route through Blake3Core, as before: one extra call layer.
+    [Benchmark(Baseline = true, Description = "via Blake3Core")]
+    public byte ViaCore()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        Blake3.Managed.Internal.Blake3Core.HashOneChunkRoot32(
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, 0, hash, _data);
+        return hash[0];
+    }
+
+    // The actual public API, for reference: same work, plus the wrapper and a 32-byte struct
+    // return. Included here because it measured far slower than the internal paths and the
+    // difference had to be attributable to something.
+    [Benchmark(Description = "public Hasher.Hash")]
+    public byte PublicApi() => ManagedHasher.Hash(_data).AsSpan()[0];
+
+    // Same, but writing into a caller-provided span instead of returning the Hash struct.
+    [Benchmark(Description = "public Hash(span,span)")]
+    public byte PublicApiSpan()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        ManagedHasher.Hash(_data, hash);
+        return hash[0];
+    }
+
+    // Dispatch straight to the compressor, as Hasher.Hash now does.
+    [Benchmark(Description = "direct dispatch")]
+    public byte Direct()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        Span<uint> words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(hash);
+
+        if (_data.Length <= 64)
+        {
+            Blake3.Managed.Internal.CompressSse41.CompressRootIvSingleBlock(_data, words);
+        }
+        else
+        {
+            Blake3.Managed.Internal.CompressSse41.HashChunkRoot32Iv(_data, words);
+        }
+
+        return hash[0];
+    }
+}
+
+/// <summary>
 /// Our own API surfaces against each other. Worth tracking separately because the adapters do not
 /// reach the parallel path today, so <see cref="Blake3HashAlgorithm"/> on a large input is several
 /// times slower than <c>Hasher.Hash</c> on the same bytes — and the adapters are what most
