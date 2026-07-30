@@ -41,12 +41,16 @@ public class Blake3HashAlgorithm : HashAlgorithm
         if ((uint)ibStart > (uint)array.Length) throw new ArgumentOutOfRangeException(nameof(ibStart));
         if ((uint)cbSize > (uint)(array.Length - ibStart)) throw new ArgumentOutOfRangeException(nameof(cbSize));
 
-        _hasher.Update(new ReadOnlySpan<byte>(array, ibStart, cbSize));
+        // UpdateWithJoin, not Update: a single large HashCore call is the common shape for this
+        // adapter (ComputeHash hands over the whole buffer at once), and Update never reaches the
+        // thread-pool path. UpdateWithJoin falls back to serial whenever its alignment
+        // preconditions do not hold, so streaming callers are unaffected.
+        _hasher.UpdateWithJoin(new ReadOnlySpan<byte>(array, ibStart, cbSize));
     }
 
     protected override void HashCore(ReadOnlySpan<byte> source)
     {
-        _hasher.Update(source);
+        _hasher.UpdateWithJoin(source);
     }
 
     protected override byte[] HashFinal()
