@@ -275,6 +275,16 @@ internal static class Blake3Core
     }
 
     /// <summary>
+    /// Entry point for inputs above the serial tree's range.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static void HashLargeParallel(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        uint flags, Span<byte> output)
+    {
+        Blake3Tree.HashAllAtOnceParallel(input, key, flags, output);
+    }
+
+    /// <summary>
     /// Reduces <paramref name="numCvs"/> chaining values (a power of two, stored
     /// contiguously in <paramref name="cvs"/>) to a single CV at cvs[0..8] by hashing
     /// parent nodes level by level, 8 parents at a time with AVX2 where possible.

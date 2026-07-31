@@ -65,7 +65,7 @@ public unsafe struct Hasher : IDisposable
         }
         else
         {
-            HashMultiChunk(input, hash.AsSpan());
+            Blake3Core.HashLargeParallel(input, Blake3Constants.IV, 0, hash.AsSpan());
         }
 
         return hash;
@@ -79,34 +79,41 @@ public unsafe struct Hasher : IDisposable
     [SkipLocalsInit]
     public static void Hash(ReadOnlySpan<byte> input, Span<byte> output)
     {
-        if (input.Length <= Blake3Constants.ChunkLen && output.Length <= 64)
+        // Dispatch on input length first. Splitting on output length at the top left a hole:
+        // a single-chunk input asking for more than 64 output bytes matched neither the
+        // single-chunk branch nor the multi-chunk one, and fell through to a tree builder that
+        // cannot describe a sub-chunk input.
+        if (input.Length <= Blake3Constants.ChunkLen)
         {
-            Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
+            if (output.Length <= 64)
+            {
+                Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
+            }
+            else
+            {
+                // Extended output from one chunk needs the chunk's full Output state, which only
+                // the incremental path produces.
+                HashViaState(input, output);
+            }
         }
-        else if (input.Length > Blake3Constants.ChunkLen && input.Length <= Blake3Tree.MaxUsefulLength)
+        else if (input.Length <= Blake3Tree.MaxUsefulLength)
         {
             Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
         }
         else
         {
-            HashMultiChunk(input, output);
+            Blake3Core.HashLargeParallel(input, Blake3Constants.IV, 0, output);
         }
     }
 
     /// <summary>
-    /// The multi-chunk path, deliberately kept out of line.
+    /// Hashes through the incremental state. Used where the tree builders do not apply.
     /// </summary>
-    /// <remarks>
-    /// HasherState embeds a 54-entry chaining-value stack, about 1.8 KB. A local of that type
-    /// anywhere in a method forces every call through that method to carry the frame, even when
-    /// the branch is not taken -- which cost roughly 40 ns on a 4-byte hash, close to half the
-    /// total. Hoisting it into its own method leaves the short-input paths with a small frame.
-    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void HashMultiChunk(ReadOnlySpan<byte> input, Span<byte> output)
+    private static void HashViaState(ReadOnlySpan<byte> input, Span<byte> output)
     {
         var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
-        state.UpdateWithJoin(input);
+        state.Update(input);
         var finalOutput = state.Finalize();
         finalOutput.RootOutputBytes(output);
     }

@@ -100,10 +100,10 @@ internal static class HashManyAvx2
             (uint)((startCounter + 4) >> 32), (uint)((startCounter + 5) >> 32),
             (uint)((startCounter + 6) >> 32), (uint)((startCounter + 7) >> 32));
 
-        var ivVec0 = Vector256.Create(Blake3Constants.IV[0]);
-        var ivVec1 = Vector256.Create(Blake3Constants.IV[1]);
-        var ivVec2 = Vector256.Create(Blake3Constants.IV[2]);
-        var ivVec3 = Vector256.Create(Blake3Constants.IV[3]);
+        var ivVec0 = Vector256.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector256.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector256.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector256.Create(Blake3Constants.Iv3);
         var blockLenVec = Vector256.Create((uint)Blake3Constants.BlockLen);
 
         fixed (byte* chunksPtr = chunks)
@@ -410,10 +410,10 @@ internal static class HashManyAvx2
             Vector256<uint> s5 = Vector256.Create(key[5]);
             Vector256<uint> s6 = Vector256.Create(key[6]);
             Vector256<uint> s7 = Vector256.Create(key[7]);
-            Vector256<uint> s8 = Vector256.Create(Blake3Constants.IV[0]);
-            Vector256<uint> s9 = Vector256.Create(Blake3Constants.IV[1]);
-            Vector256<uint> s10 = Vector256.Create(Blake3Constants.IV[2]);
-            Vector256<uint> s11 = Vector256.Create(Blake3Constants.IV[3]);
+            Vector256<uint> s8 = Vector256.Create(Blake3Constants.Iv0);
+            Vector256<uint> s9 = Vector256.Create(Blake3Constants.Iv1);
+            Vector256<uint> s10 = Vector256.Create(Blake3Constants.Iv2);
+            Vector256<uint> s11 = Vector256.Create(Blake3Constants.Iv3);
             Vector256<uint> s12 = Vector256<uint>.Zero;                      // counter lo
             Vector256<uint> s13 = Vector256<uint>.Zero;                      // counter hi
             Vector256<uint> s14 = Vector256.Create((uint)Blake3Constants.BlockLen);

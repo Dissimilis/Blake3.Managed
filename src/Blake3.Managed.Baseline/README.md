@@ -22,8 +22,10 @@ distort small-input measurements.
 
 ## Snapshot provenance
 
-Taken from commit `21dc244` (tag `v1.2.1` + 1), 2026-07-29 — immediately before the optimization
-pass began. This is the "before" the optimization work is measured against.
+Refreshed to commit `d097897`, 2026-07-30. During an active optimization campaign the baseline is
+moved forward to the last commit, so each experiment is measured against the code it is trying to
+improve rather than against a distant starting point. Numbers taken before and after a refresh are
+not comparable.
 
 ## Refreshing the snapshot
 

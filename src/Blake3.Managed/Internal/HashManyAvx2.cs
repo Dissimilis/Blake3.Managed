@@ -72,6 +72,72 @@ internal static class HashManyAvx2
         b = RotateRight7(Avx2.Xor(b, c));
     }
 
+    /// <summary>
+    /// Four independent G functions, interleaved phase by phase rather than run one after another.
+    /// </summary>
+    /// <remarks>
+    /// A single G is a serial chain: add, xor, rotate, add, xor, rotate, and so on. Emitting four
+    /// of them back to back leaves eight dependent instructions in a row and relies on the
+    /// out-of-order engine to find the parallelism across them. RyuJIT does very little x64
+    /// instruction scheduling, so issuing the same phase of all four G functions together exposes
+    /// that parallelism directly in the instruction stream.
+    ///
+    /// The four G functions of a BLAKE3 round -- whether the column set or the diagonal set --
+    /// operate on disjoint state words, so reordering across them cannot change the result.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void G256x4(
+        ref Vector256<uint> a0, ref Vector256<uint> b0, ref Vector256<uint> c0, ref Vector256<uint> d0,
+        ref Vector256<uint> a1, ref Vector256<uint> b1, ref Vector256<uint> c1, ref Vector256<uint> d1,
+        ref Vector256<uint> a2, ref Vector256<uint> b2, ref Vector256<uint> c2, ref Vector256<uint> d2,
+        ref Vector256<uint> a3, ref Vector256<uint> b3, ref Vector256<uint> c3, ref Vector256<uint> d3,
+        Vector256<uint> m0x, Vector256<uint> m0y,
+        Vector256<uint> m1x, Vector256<uint> m1y,
+        Vector256<uint> m2x, Vector256<uint> m2y,
+        Vector256<uint> m3x, Vector256<uint> m3y)
+    {
+        a0 = Avx2.Add(Avx2.Add(a0, b0), m0x);
+        a1 = Avx2.Add(Avx2.Add(a1, b1), m1x);
+        a2 = Avx2.Add(Avx2.Add(a2, b2), m2x);
+        a3 = Avx2.Add(Avx2.Add(a3, b3), m3x);
+
+        d0 = RotateRight16(Avx2.Xor(d0, a0));
+        d1 = RotateRight16(Avx2.Xor(d1, a1));
+        d2 = RotateRight16(Avx2.Xor(d2, a2));
+        d3 = RotateRight16(Avx2.Xor(d3, a3));
+
+        c0 = Avx2.Add(c0, d0);
+        c1 = Avx2.Add(c1, d1);
+        c2 = Avx2.Add(c2, d2);
+        c3 = Avx2.Add(c3, d3);
+
+        b0 = RotateRight12(Avx2.Xor(b0, c0));
+        b1 = RotateRight12(Avx2.Xor(b1, c1));
+        b2 = RotateRight12(Avx2.Xor(b2, c2));
+        b3 = RotateRight12(Avx2.Xor(b3, c3));
+
+        a0 = Avx2.Add(Avx2.Add(a0, b0), m0y);
+        a1 = Avx2.Add(Avx2.Add(a1, b1), m1y);
+        a2 = Avx2.Add(Avx2.Add(a2, b2), m2y);
+        a3 = Avx2.Add(Avx2.Add(a3, b3), m3y);
+
+        d0 = RotateRight8(Avx2.Xor(d0, a0));
+        d1 = RotateRight8(Avx2.Xor(d1, a1));
+        d2 = RotateRight8(Avx2.Xor(d2, a2));
+        d3 = RotateRight8(Avx2.Xor(d3, a3));
+
+        c0 = Avx2.Add(c0, d0);
+        c1 = Avx2.Add(c1, d1);
+        c2 = Avx2.Add(c2, d2);
+        c3 = Avx2.Add(c3, d3);
+
+        b0 = RotateRight7(Avx2.Xor(b0, c0));
+        b1 = RotateRight7(Avx2.Xor(b1, c1));
+        b2 = RotateRight7(Avx2.Xor(b2, c2));
+        b3 = RotateRight7(Avx2.Xor(b3, c3));
+    }
+
+
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void HashMany(ReadOnlySpan<byte> chunks, int numChunks,
@@ -203,69 +269,138 @@ internal static class HashManyAvx2
                 Vector256<uint> s14 = blockLenVec, s15 = flagsVec;
 
                 // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-                G256(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[0], m[1],
+                    m[2], m[3],
+                    m[4], m[5],
+                    m[6], m[7]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[8], m[9],
+                    m[10], m[11],
+                    m[12], m[13],
+                    m[14], m[15]);
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-                G256(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[2], m[6],
+                    m[3], m[10],
+                    m[7], m[0],
+                    m[4], m[13]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[1], m[11],
+                    m[12], m[5],
+                    m[9], m[14],
+                    m[15], m[8]);
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-                G256(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[3], m[4],
+                    m[10], m[12],
+                    m[13], m[2],
+                    m[7], m[14]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[6], m[5],
+                    m[9], m[0],
+                    m[11], m[15],
+                    m[8], m[1]);
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-                G256(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[10], m[7],
+                    m[12], m[9],
+                    m[14], m[3],
+                    m[13], m[15]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[4], m[0],
+                    m[11], m[2],
+                    m[5], m[8],
+                    m[1], m[6]);
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-                G256(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[12], m[13],
+                    m[9], m[11],
+                    m[15], m[10],
+                    m[14], m[8]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[7], m[2],
+                    m[5], m[3],
+                    m[0], m[1],
+                    m[6], m[4]);
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-                G256(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[9], m[14],
+                    m[11], m[5],
+                    m[8], m[12],
+                    m[15], m[1]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[13], m[3],
+                    m[0], m[10],
+                    m[2], m[6],
+                    m[4], m[7]);
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-                G256(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-                G256(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-                G256(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-                G256(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-                G256(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-                G256(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-                G256(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-                G256(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
-
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[11], m[15],
+                    m[5], m[0],
+                    m[1], m[9],
+                    m[8], m[6]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[14], m[10],
+                    m[2], m[12],
+                    m[3], m[4],
+                    m[7], m[13]);
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = Avx2.Xor(s0, s8);
                 cv1 = Avx2.Xor(s1, s9);
@@ -420,69 +555,138 @@ internal static class HashManyAvx2
             Vector256<uint> s15 = Vector256.Create(flags);
 
             // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-            G256(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[0], m[1],
+                m[2], m[3],
+                m[4], m[5],
+                m[6], m[7]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[8], m[9],
+                m[10], m[11],
+                m[12], m[13],
+                m[14], m[15]);
             // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-            G256(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[2], m[6],
+                m[3], m[10],
+                m[7], m[0],
+                m[4], m[13]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[1], m[11],
+                m[12], m[5],
+                m[9], m[14],
+                m[15], m[8]);
             // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-            G256(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[3], m[4],
+                m[10], m[12],
+                m[13], m[2],
+                m[7], m[14]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[6], m[5],
+                m[9], m[0],
+                m[11], m[15],
+                m[8], m[1]);
             // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-            G256(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[10], m[7],
+                m[12], m[9],
+                m[14], m[3],
+                m[13], m[15]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[4], m[0],
+                m[11], m[2],
+                m[5], m[8],
+                m[1], m[6]);
             // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-            G256(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[12], m[13],
+                m[9], m[11],
+                m[15], m[10],
+                m[14], m[8]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[7], m[2],
+                m[5], m[3],
+                m[0], m[1],
+                m[6], m[4]);
             // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-            G256(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[9], m[14],
+                m[11], m[5],
+                m[8], m[12],
+                m[15], m[1]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[13], m[3],
+                m[0], m[10],
+                m[2], m[6],
+                m[4], m[7]);
             // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-            G256(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-            G256(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-            G256(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-            G256(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-            G256(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-            G256(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-            G256(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-            G256(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
-
+            G256x4(
+                ref s0, ref s4, ref s8, ref s12,
+                ref s1, ref s5, ref s9, ref s13,
+                ref s2, ref s6, ref s10, ref s14,
+                ref s3, ref s7, ref s11, ref s15,
+                m[11], m[15],
+                m[5], m[0],
+                m[1], m[9],
+                m[8], m[6]);
+            G256x4(
+                ref s0, ref s5, ref s10, ref s15,
+                ref s1, ref s6, ref s11, ref s12,
+                ref s2, ref s7, ref s8, ref s13,
+                ref s3, ref s4, ref s9, ref s14,
+                m[14], m[10],
+                m[2], m[12],
+                m[3], m[4],
+                m[7], m[13]);
             cv0 = Avx2.Xor(s0, s8);
             cv1 = Avx2.Xor(s1, s9);
             cv2 = Avx2.Xor(s2, s10);

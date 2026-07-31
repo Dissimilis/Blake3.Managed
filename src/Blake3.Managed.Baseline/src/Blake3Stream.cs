@@ -72,7 +72,7 @@ public class Blake3Stream : Stream
         if (length > 0)
         {
             var span = new Span<byte>(buffer, offset, length);
-            _hasher.Update(span);
+            _hasher.UpdateWithJoin(span);
         }
         return length;
     }
@@ -82,7 +82,7 @@ public class Blake3Stream : Stream
         var length = await _stream.ReadAsync(buffer, offset, count, cancellationToken);
         if (length > 0)
         {
-            _hasher.Update(new Span<byte>(buffer, offset, length));
+            _hasher.UpdateWithJoin(new Span<byte>(buffer, offset, length));
         }
         return length;
     }
@@ -92,7 +92,7 @@ public class Blake3Stream : Stream
         var length = await _stream.ReadAsync(buffer, cancellationToken);
         if (length > 0)
         {
-            _hasher.Update(buffer.Span.Slice(0, length));
+            _hasher.UpdateWithJoin(buffer.Span.Slice(0, length));
         }
         return length;
     }
@@ -102,7 +102,7 @@ public class Blake3Stream : Stream
         var length = _stream.Read(buffer);
         if (length > 0)
         {
-            _hasher.Update(buffer.Slice(0, length));
+            _hasher.UpdateWithJoin(buffer.Slice(0, length));
         }
         return length;
     }
@@ -113,7 +113,7 @@ public class Blake3Stream : Stream
         if (value < 0) return value;
         var bValue = (byte) value;
         var span = new ReadOnlySpan<byte>(&bValue, 1);
-        _hasher.Update(span);
+        _hasher.UpdateWithJoin(span);
         return value;
     }
 
@@ -123,7 +123,7 @@ public class Blake3Stream : Stream
         if (count > 0)
         {
             var span = new Span<byte>(buffer, offset, count);
-            _hasher.Update(span);
+            _hasher.UpdateWithJoin(span);
         }
     }
 
@@ -132,21 +132,21 @@ public class Blake3Stream : Stream
         await _stream.WriteAsync(buffer, offset, count, cancellationToken);
         if (count > 0)
         {
-            _hasher.Update(new Span<byte>(buffer, offset, count));
+            _hasher.UpdateWithJoin(new Span<byte>(buffer, offset, count));
         }
     }
 
     public override void Write(ReadOnlySpan<byte> buffer)
     {
         _stream.Write(buffer);
-        _hasher.Update(buffer);
+        _hasher.UpdateWithJoin(buffer);
     }
 
     public override unsafe void WriteByte(byte value)
     {
         _stream.WriteByte(value);
         var span = new ReadOnlySpan<byte>(&value, 1);
-        _hasher.Update(span);
+        _hasher.UpdateWithJoin(span);
     }
 
     public override long Seek(long offset, SeekOrigin origin)

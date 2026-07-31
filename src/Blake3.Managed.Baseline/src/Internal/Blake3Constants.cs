@@ -52,6 +52,19 @@ internal static class Blake3Constants
     // IV words (same as SHA-256)
     public static ReadOnlySpan<uint> IV => Iv;
 
+    // The same eight words as compile-time constants. The kernels used to read these out of the
+    // Iv array on every compression, which costs a static-field load plus an array access and
+    // stops the JIT folding them into the instruction stream. As consts, Vector128/256.Create
+    // becomes a constant materialised from the code's own data section.
+    public const uint Iv0 = 0x6A09E667;
+    public const uint Iv1 = 0xBB67AE85;
+    public const uint Iv2 = 0x3C6EF372;
+    public const uint Iv3 = 0xA54FF53A;
+    public const uint Iv4 = 0x510E527F;
+    public const uint Iv5 = 0x9B05688C;
+    public const uint Iv6 = 0x1F83D9AB;
+    public const uint Iv7 = 0x5BE0CD19;
+
     // Message word permutation for each round
     public static ReadOnlySpan<byte> MsgPermutation => MessagePermutation;
 

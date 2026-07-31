@@ -33,19 +33,42 @@ public unsafe struct Hasher : IDisposable
     [SkipLocalsInit]
     public static Hash Hash(ReadOnlySpan<byte> input)
     {
-        Span<byte> bytes = stackalloc byte[Blake3.Managed.Hash.Size];
-        if (input.Length <= Blake3Constants.ChunkLen)
+        // Written directly into the returned value: the previous shape produced 64 root bytes,
+        // copied 32 into a stack buffer, then copied those 32 again into the Hash.
+        //
+        // SkipInit rather than `new Hash()`: every path below writes all 32 bytes, so zero-
+        // initialising first is 32 bytes of stores that are immediately overwritten. That is
+        // measurable when the whole call is under 100 ns.
+        Unsafe.SkipInit(out Blake3.Managed.Hash hash);
+
+        if (input.Length <= Blake3Constants.BlockLen && CompressSse41.IsSupported)
         {
-            Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, bytes, input);
+            // The most common shape by far: one block, unkeyed. Dispatched here rather than
+            // through Blake3Core so the whole hash is a single call into the compressor.
+            CompressSse41.CompressRootIvSingleBlock(input,
+                MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+        }
+        else if (input.Length <= Blake3Constants.ChunkLen && CompressSse41.IsSupported)
+        {
+            // Multi-block single chunk, unkeyed: straight to the fused chunk loop, same reason.
+            CompressSse41.HashChunkRoot32Iv(input, MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+        }
+        else if (input.Length <= Blake3Constants.ChunkLen)
+        {
+            Blake3Core.HashOneChunkRoot32(Blake3Constants.IV, 0, 0, hash.AsSpan(), input);
+        }
+        else if (input.Length <= Blake3Tree.MaxUsefulLength)
+        {
+            // Wide-frontier tree: compresses parents in batches instead of one at a time. Only
+            // used below the size where the thread-pool path takes over.
+            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
         }
         else
         {
-            var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
-            state.UpdateWithJoin(input);
-            var output = state.Finalize();
-            output.RootOutputBytes(bytes);
+            HashMultiChunk(input, hash.AsSpan());
         }
-        return Blake3.Managed.Hash.FromBytes(bytes);
+
+        return hash;
     }
 
     /// <summary>
@@ -60,13 +83,32 @@ public unsafe struct Hasher : IDisposable
         {
             Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
         }
+        else if (input.Length > Blake3Constants.ChunkLen && input.Length <= Blake3Tree.MaxUsefulLength)
+        {
+            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
+        }
         else
         {
-            var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
-            state.UpdateWithJoin(input);
-            var finalOutput = state.Finalize();
-            finalOutput.RootOutputBytes(output);
+            HashMultiChunk(input, output);
         }
+    }
+
+    /// <summary>
+    /// The multi-chunk path, deliberately kept out of line.
+    /// </summary>
+    /// <remarks>
+    /// HasherState embeds a 54-entry chaining-value stack, about 1.8 KB. A local of that type
+    /// anywhere in a method forces every call through that method to carry the frame, even when
+    /// the branch is not taken -- which cost roughly 40 ns on a 4-byte hash, close to half the
+    /// total. Hoisting it into its own method leaves the short-input paths with a small frame.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void HashMultiChunk(ReadOnlySpan<byte> input, Span<byte> output)
+    {
+        var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
+        state.UpdateWithJoin(input);
+        var finalOutput = state.Finalize();
+        finalOutput.RootOutputBytes(output);
     }
 
     /// <summary>

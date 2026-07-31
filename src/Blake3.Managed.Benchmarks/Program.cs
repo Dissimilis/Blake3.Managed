@@ -78,7 +78,9 @@ public static class Program
             ? BenchmarkRunner.Run(
                 new[] { typeof(OptimizationBenchmarks), typeof(CompetitiveBenchmarks), typeof(ApiSurfaceBenchmarks) },
                 config, passthrough)
-            : flags.Contains("--dispatch")
+            : flags.Contains("--kernel")
+                ? new[] { BenchmarkRunner.Run<KernelBenchmarks>(config, passthrough) }
+                : flags.Contains("--dispatch")
                 ? new[] { BenchmarkRunner.Run<DispatchBenchmarks>(config, passthrough) }
                 : flags.Contains("--competitive")
                 ? new[] { BenchmarkRunner.Run<CompetitiveBenchmarks>(config, passthrough) }
@@ -183,6 +185,7 @@ public static class Program
     private static bool IsOurFlag(string arg) =>
         arg.Equals("--competitive", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--dispatch", StringComparison.OrdinalIgnoreCase)
+        || arg.Equals("--kernel", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--api", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--all", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--quick", StringComparison.OrdinalIgnoreCase)

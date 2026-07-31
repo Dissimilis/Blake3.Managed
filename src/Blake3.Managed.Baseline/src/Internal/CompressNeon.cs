@@ -142,7 +142,8 @@ internal static class CompressNeon
         ref uint cvRef = ref MemoryMarshal.GetReference(cv);
         var row0 = VectorCompat.Load(ref cvRef);
         var row1 = VectorCompat.Load(ref cvRef, 4);
-        var row2 = VectorCompat.Load(ref MemoryMarshal.GetReference(Blake3Constants.IV));
+        var row2 = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
         var row3 = Vector128.Create((uint)counter, (uint)(counter >> 32), blockLen, flags);
 
         fixed (uint* bp = block)
@@ -169,7 +170,8 @@ internal static class CompressNeon
         ref uint cvRef = ref MemoryMarshal.GetReference(cv);
         var row0 = VectorCompat.Load(ref cvRef);
         var row1 = VectorCompat.Load(ref cvRef, 4);
-        var row2 = VectorCompat.Load(ref MemoryMarshal.GetReference(Blake3Constants.IV));
+        var row2 = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
         var row3 = Vector128.Create((uint)counter, (uint)(counter >> 32), blockLen, flags);
 
         fixed (uint* bp = block)

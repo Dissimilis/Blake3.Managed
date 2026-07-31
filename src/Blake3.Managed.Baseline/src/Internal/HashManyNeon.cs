@@ -152,10 +152,10 @@ internal static class HashManyNeon
             (uint)((startCounter+4)>>32), (uint)((startCounter+5)>>32),
             (uint)((startCounter+6)>>32), (uint)((startCounter+7)>>32));
 
-        var iv0 = Vector128.Create(Blake3Constants.IV[0]);
-        var iv1 = Vector128.Create(Blake3Constants.IV[1]);
-        var iv2 = Vector128.Create(Blake3Constants.IV[2]);
-        var iv3 = Vector128.Create(Blake3Constants.IV[3]);
+        var iv0 = Vector128.Create(Blake3Constants.Iv0);
+        var iv1 = Vector128.Create(Blake3Constants.Iv1);
+        var iv2 = Vector128.Create(Blake3Constants.Iv2);
+        var iv3 = Vector128.Create(Blake3Constants.Iv3);
         var blkVec = Vector128.Create((uint)Blake3Constants.BlockLen);
 
         fixed (byte* chunksPtr = chunks)
@@ -307,10 +307,10 @@ internal static class HashManyNeon
             (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
             (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32));
 
-        var ivVec0 = Vector128.Create(Blake3Constants.IV[0]);
-        var ivVec1 = Vector128.Create(Blake3Constants.IV[1]);
-        var ivVec2 = Vector128.Create(Blake3Constants.IV[2]);
-        var ivVec3 = Vector128.Create(Blake3Constants.IV[3]);
+        var ivVec0 = Vector128.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector128.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector128.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector128.Create(Blake3Constants.Iv3);
         var blockLenVec = Vector128.Create((uint)Blake3Constants.BlockLen);
 
         fixed (byte* chunksPtr = chunks)

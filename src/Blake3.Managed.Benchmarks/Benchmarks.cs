@@ -229,6 +229,116 @@ public class DispatchBenchmarks
 }
 
 /// <summary>
+/// Raw kernel throughput, isolated from tree building and parent hashing.
+/// </summary>
+/// <remarks>
+/// The end-to-end numbers mix chunk hashing, parent hashing and scheduling, which makes it
+/// impossible to tell which one is behind a gap. These measure one call of each multi-chunk kernel
+/// so the per-chunk cost can be compared directly against what the reference implementation
+/// achieves.
+/// </remarks>
+public class KernelBenchmarks
+{
+    private byte[] _chunks = null!;
+    private byte[] _big = null!;
+    private uint[] _cvs = null!;
+    private uint[] _parents = null!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _chunks = new byte[64 * 1024];
+        new Random(3).NextBytes(_chunks);
+        _big = new byte[1024 * 1024];
+        new Random(5).NextBytes(_big);
+        _cvs = new uint[64 * 8];
+        _parents = new uint[16 * 8];
+        new Random(4).NextBytes(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_parents.AsSpan()));
+    }
+
+    // 8 chunks (8 KB) through the AVX2 kernel: 16 eight-way compressions.
+    [Benchmark(Description = "AVX2 HashMany 8 chunks")]
+    public uint Avx2Eight()
+    {
+        Blake3.Managed.Internal.HashManyAvx2.HashMany(_chunks.AsSpan(0, 8 * 1024), 8,
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, 0, _cvs.AsSpan(0, 64));
+        return _cvs[0];
+    }
+
+    // 4 chunks through the SSE kernel, which is what a 4 KB input currently uses.
+    [Benchmark(Description = "SSE HashMany 4 chunks")]
+    public uint SseFour()
+    {
+        Blake3.Managed.Internal.HashManySse41.HashMany(_chunks.AsSpan(0, 4 * 1024), 4,
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, 0, _cvs.AsSpan(0, 32));
+        return _cvs[0];
+    }
+
+    // The same 4 chunks through the AVX2 kernel with four lanes wasted, for comparison.
+    [Benchmark(Description = "AVX2 HashMany 8 chunks (for 4KB compare)")]
+    public uint Avx2EightFor4K()
+    {
+        Blake3.Managed.Internal.HashManyAvx2.HashMany(_chunks.AsSpan(0, 8 * 1024), 8,
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, 0, _cvs.AsSpan(0, 64));
+        return _cvs[0];
+    }
+
+    // Serial tree over 1 MB: the per-unit work with no thread-pool involvement.
+    [Benchmark(Description = "serial tree 1MB")]
+    public byte SerialTree1M()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        Blake3.Managed.Internal.Blake3Tree.HashAllAtOnce(_big,
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, hash);
+        return hash[0];
+    }
+
+    // Parallel tree over the same 1 MB.
+    [Benchmark(Description = "parallel tree 1MB")]
+    public byte ParallelTree1M()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        Blake3.Managed.Internal.Blake3Tree.HashAllAtOnceParallel(_big,
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, hash);
+        return hash[0];
+    }
+
+    // The public API on the same 1 MB buffer, which should reach the same parallel tree.
+    [Benchmark(Description = "public Hasher.Hash 1MB")]
+    public byte PublicHash1M() => ManagedHasher.Hash(_big).AsSpan()[0];
+
+    // Serial tree over one 128 KB unit, i.e. what a single parallel task does at 10 MB.
+    [Benchmark(Description = "serial tree 128KB unit")]
+    public byte SerialUnit()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        Blake3.Managed.Internal.Blake3Tree.HashAllAtOnce(_big.AsSpan(0, 128 * 1024),
+            Blake3.Managed.Internal.Blake3Constants.IV, 0, hash);
+        return hash[0];
+    }
+
+    // 8 parent nodes in one AVX2 call.
+    [Benchmark(Description = "AVX2 HashParents8")]
+    public uint Parents8()
+    {
+        Blake3.Managed.Internal.HashManyAvx2.HashParents8(_parents, 
+            Blake3.Managed.Internal.Blake3Constants.IV, Blake3.Managed.Internal.Blake3Constants.Parent,
+            _cvs.AsSpan(0, 64));
+        return _cvs[0];
+    }
+
+    // One scalar/SSE parent compression, for the per-parent cost.
+    [Benchmark(Description = "single parent compression")]
+    public uint Parent1()
+    {
+        Blake3.Managed.Internal.Blake3Core.CompressCv(
+            Blake3.Managed.Internal.Blake3Constants.IV, _parents.AsSpan(0, 16), 0, 64,
+            Blake3.Managed.Internal.Blake3Constants.Parent, _cvs.AsSpan(0, 8));
+        return _cvs[0];
+    }
+}
+
+/// <summary>
 /// Our own API surfaces against each other. Worth tracking separately because the adapters do not
 /// reach the parallel path today, so <see cref="Blake3HashAlgorithm"/> on a large input is several
 /// times slower than <c>Hasher.Hash</c> on the same bytes — and the adapters are what most
