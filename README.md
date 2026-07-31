@@ -1,6 +1,6 @@
-# Blake3.Managed — BLAKE3 hash function for .NET
+# Blake3.Managed: BLAKE3 hash function for .NET
 
-A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function for .NET. Uses hardware intrinsics (AVX2, SSE/SSSE3, ARM NEON) for high performance with automatic scalar fallback — faster than SHA-256 and MD5, with zero native dependencies and no P/Invoke.
+A pure managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) cryptographic hash function for .NET. Uses hardware intrinsics (AVX2, SSE/SSSE3, ARM NEON) for high performance with automatic scalar fallback. Faster than SHA-256 and MD5, with zero native dependencies and no P/Invoke.
 
 BLAKE3 is a modern, secure hash ideal for file checksums, content addressing, deduplication, data integrity, message authentication (keyed MAC) and key derivation (KDF). This library brings it to C# / .NET as a single fully managed, Native AOT-friendly NuGet package that runs everywhere .NET runs.
 
@@ -27,11 +27,11 @@ BLAKE3 is a modern, secure hash ideal for file checksums, content addressing, de
 
 So "managed versus native" is no longer the interesting distinction - there are several good managed options. What this library offers instead:
 
-- **A multithreaded one-shot path.** `Hasher.Hash` splits large inputs into 64-chunk subtrees and hashes them on the thread pool, so above roughly 128 KB it finishes sooner than any single-threaded implementation, including the Rust binding. That is wall-clock latency bought with more cores, not better per-core efficiency - worth knowing if you are already saturating every core with other work.
+- **A multithreaded one-shot path.** `Hasher.Hash` splits large inputs into balanced subtrees and hashes them on the thread pool, so above roughly 72 KB it finishes sooner than any single-threaded implementation, including the Rust binding. That is wall-clock latency bought with more cores, not better per-core efficiency, which is worth knowing if you are already saturating every core with other work.
 - **`net6.0` support**, which `Blake3` 3.x dropped.
 - **No native dependency**, so deployment stays simple and Native AOT and trimming work without extra care.
 
-Below 128 KB, single-threaded, this library is within roughly 10-60% of the Rust implementation depending on size. See the numbers below.
+On short inputs it is the fastest of the three: 4 bytes and 128 bytes both beat the Rust binding and `Blake3` 3.x outright. Between 1 KB and 64 KB, where the work is single-threaded, it runs at 1.0x to 1.8x the Rust implementation depending on size. See the numbers below.
 
 ## Installation
 
@@ -93,6 +93,7 @@ var parallelHash = parallel.Finalize();
 One-shot hashing (`Hasher.Hash(data)`) against the Rust implementation via P/Invoke
 ([Blake3.Native](https://www.nuget.org/packages/Blake3.Native)), the managed
 [Blake3](https://www.nuget.org/packages/Blake3) 3.x package, and `System.Security.Cryptography.SHA256`.
+Above roughly 72 KB, `Hasher.Hash` spreads the work across cores; every other column is single-threaded.
 
 ```
 BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200)
@@ -104,36 +105,18 @@ Mean time per hash, and the ratio against the Rust implementation (lower is bett
 
 | Input | Blake3.Native (Rust) | Blake3 3.x (managed) | **Blake3.Managed** | SHA256 |
 |------:|---------------------:|---------------------:|-------------------:|-------:|
-| 4 B | 74 ns | 74 ns _(1.00)_ | **91 ns _(1.22)_** | 151 ns _(2.02)_ |
-| 128 B | 125 ns | 107 ns _(0.85)_ | **141 ns _(1.13)_** | 184 ns _(1.47)_ |
-| 1 KB | 832 ns | 894 ns _(1.07)_ | **914 ns _(1.10)_** | 577 ns _(0.69)_ |
-| 4 KB | 1.20 us | 3.83 us _(3.19)_ | **1.48 us _(1.23)_** | 1.92 us _(1.60)_ |
-| 8 KB | 1.42 us | 1.66 us _(1.17)_ | **1.77 us _(1.25)_** | 3.72 us _(2.61)_ |
-| 16 KB | 2.22 us | 2.95 us _(1.33)_ | **3.21 us _(1.45)_** | 7.25 us _(3.27)_ |
-| 64 KB | 8.38 us | 11.49 us _(1.37)_ | **13.49 us _(1.61)_** | 28.60 us _(3.41)_ |
-| 128 KB | 16.59 us | 20.92 us _(1.26)_ | **24.50 us _(1.48)_** | 57.01 us _(3.44)_ |
-| 1 MB | 140.1 us | 181.8 us _(1.30)_ | **74.4 us _(0.53)_** | 460.9 us _(3.29)_ |
-| 10 MB | 2.19 ms | 3.38 ms _(1.54)_ | **0.60 ms _(0.27)_** | 4.59 ms _(2.10)_ |
+| 4 B | 72.6 ns | 72.5 ns _(1.00)_ | **48.3 ns _(0.67)_** | 130.5 ns _(1.80)_ |
+| 128 B | 122.9 ns | 105.7 ns _(0.86)_ | **98.4 ns _(0.80)_** | 185.4 ns _(1.51)_ |
+| 1 KB | 824.1 ns | 897.2 ns _(1.09)_ | **849.9 ns _(1.03)_** | 570.4 ns _(0.69)_ |
+| 4 KB | 1.16 us | 3.80 us _(3.26)_ | **1.37 us _(1.17)_** | 1.89 us _(1.63)_ |
+| 8 KB | 1.29 us | 1.62 us _(1.26)_ | **1.59 us _(1.24)_** | 3.70 us _(2.88)_ |
+| 16 KB | 2.18 us | 2.91 us _(1.34)_ | **3.04 us _(1.39)_** | 7.19 us _(3.30)_ |
+| 64 KB | 8.23 us | 12.66 us _(1.54)_ | **15.07 us _(1.83)_** | 28.99 us _(3.52)_ |
+| 128 KB | 17.25 us | 24.47 us _(1.42)_ | **13.21 us _(0.77)_** | 58.72 us _(3.40)_ |
+| 1 MB | 140.4 us | 168.1 us _(1.20)_ | **65.7 us _(0.47)_** | 454.5 us _(3.24)_ |
+| 10 MB | 1.48 ms | 2.25 ms _(1.52)_ | **0.44 ms _(0.30)_** | 4.53 ms _(3.06)_ |
 
 ![BLAKE3 throughput on .NET](img/benchmark.svg)
-
-- **Under 1 KB**, all three BLAKE3 implementations are within about 20% of each other. SHA-256 wins at
-  exactly 1 KB on this CPU because it has dedicated hardware instructions; BLAKE3 pulls ahead from 4 KB up.
-- **4 KB to 128 KB** is single-threaded work, where this library runs 1.2-1.6x the Rust implementation.
-- **Above 128 KB**, one-shot `Hash()` is *faster than Rust* - 1.9x at 1 MB and 3.7x at 10 MB - because it
-  hashes 64-chunk subtrees on the thread pool while the others are single-threaded. This is wall-clock
-  latency from using 8 cores, not per-core efficiency.
-- **Incremental `Update()` is slower than one-shot `Hash()`**, by roughly 1.2x at small sizes and more at
-  large ones, because a streaming hasher cannot know the input length and so cannot batch parent hashing
-  or parallelise. When you have all the bytes, prefer `Hasher.Hash(data)`; when streaming a large buffer,
-  prefer `UpdateWithJoin`.
-- `Blake3HashAlgorithm` and `Blake3Stream` route bulk writes through the parallel path too, so they land
-  within a couple of percent of `Hasher.Hash` on large inputs.
-- **Caveat on precision.** These come from a laptop that thermally throttles roughly 2x under sustained
-  load. Absolute numbers are not comparable between sessions, and repeat runs moved the 16-64 KB ratios by
-  up to 20%. Treat them as indicative. The benchmark project in this repo reproduces them, and gates every
-  run on ~7,000 correctness checks first; `--report` produces this table and `img/benchmark.svg` is
-  generated from it by `src/Blake3.Managed.Benchmarks/make_chart.py`.
 
 ### Hardware Intrinsics Tiering
 
@@ -164,6 +147,6 @@ dotnet pack src/Blake3.Managed -c Release
 
 ## Acknowledgments
 
-- [Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel — API design and test infrastructure
-- [Blake2Fast](https://github.com/saucecontrol/Blake2Fast) by Clinton Ingram — shuffle-based SSE message permutation
-- [BLAKE3 Reference Implementation](https://github.com/BLAKE3-team/BLAKE3) — algorithm specification and test vectors
+- [Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel, for API design and test infrastructure
+- [Blake2Fast](https://github.com/saucecontrol/Blake2Fast) by Clinton Ingram, for the shuffle-based SSE message permutation
+- [BLAKE3 Reference Implementation](https://github.com/BLAKE3-team/BLAKE3), for the algorithm specification and test vectors
