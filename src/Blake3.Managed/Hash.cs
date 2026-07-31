@@ -125,6 +125,23 @@ public struct Hash : IEquatable<Hash>
         return MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref this, 1));
     }
 
+    /// <summary>
+    /// The hash as eight 32-bit words, for compressors that write words directly.
+    /// </summary>
+    /// <remarks>
+    /// Going through <see cref="AsSpan"/> and casting bytes to words costs a length division and
+    /// a bounds check on a call that is under 100 ns in total. The layout is a fixed 32 bytes, so
+    /// the word view can be formed directly.
+    /// </remarks>
+#if NET7_0_OR_GREATER
+    [UnscopedRef]
+#endif
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal Span<uint> AsWordSpan()
+    {
+        return MemoryMarshal.CreateSpan(ref Unsafe.As<Hash, uint>(ref this), 8);
+    }
+
     public static bool operator ==(Hash left, Hash right)
     {
         return left.Equals(right);

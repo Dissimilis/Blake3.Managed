@@ -45,13 +45,12 @@ public unsafe struct Hasher : IDisposable
         {
             // The most common shape by far: one block, unkeyed. Dispatched here rather than
             // through Blake3Core so the whole hash is a single call into the compressor.
-            CompressSse41.CompressRootIvSingleBlock(input,
-                MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+            CompressSse41.CompressRootIvSingleBlock(input, hash.AsWordSpan());
         }
         else if (input.Length <= Blake3Constants.ChunkLen && CompressSse41.IsSupported)
         {
             // Multi-block single chunk, unkeyed: straight to the fused chunk loop, same reason.
-            CompressSse41.HashChunkRoot32Iv(input, MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+            CompressSse41.HashChunkRoot32Iv(input, hash.AsWordSpan());
         }
         else if (input.Length <= Blake3Constants.ChunkLen)
         {
