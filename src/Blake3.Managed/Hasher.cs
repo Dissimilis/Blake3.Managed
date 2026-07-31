@@ -47,6 +47,11 @@ public unsafe struct Hasher : IDisposable
             // through Blake3Core so the whole hash is a single call into the compressor.
             CompressSse41.CompressRootIvSingleBlock(input, hash.AsWordSpan());
         }
+        else if (input.Length <= 2 * Blake3Constants.BlockLen && CompressSse41.IsSupported)
+        {
+            // Exactly two blocks: fully unrolled, every flag a compile-time constant.
+            CompressSse41.CompressRootIvTwoBlocks(input, hash.AsWordSpan());
+        }
         else if (input.Length <= Blake3Constants.ChunkLen && CompressSse41.IsSupported)
         {
             // Multi-block single chunk, unkeyed: straight to the fused chunk loop, same reason.
