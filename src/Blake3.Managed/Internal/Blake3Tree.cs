@@ -75,15 +75,28 @@ internal static class Blake3Tree
     /// </remarks>
     [SkipLocalsInit]
     internal static unsafe void HashAllAtOnceParallel(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        uint flags, Span<byte> output)
+        uint flags, Span<byte> output, int maxDegreeOfParallelism = -1)
     {
         const int chunkLen = Blake3Constants.ChunkLen;
+
+        // A cap has to reach the unit sizing as well as the loop. Capping only the loop would
+        // still cut the input into ProcessorCount * 4 units and then push them through fewer
+        // threads, paying the hand-off cost for parallelism that was asked not to happen.
+        //
+        // Clamped to the core count: a cap above it is a ceiling on threads, not a reason to cut
+        // the input finer than the machine can actually run. It also keeps the arithmetic below
+        // in range -- degree * 4 * 2 overflowed for very large caps, wrapping the loop bound
+        // negative, growing units until the whole input was one unit, and then faulting in the
+        // two-CV root fold.
+        int degree = maxDegreeOfParallelism > 0
+            ? Math.Min(maxDegreeOfParallelism, Environment.ProcessorCount)
+            : Environment.ProcessorCount;
 
         // One flat fan-out, not a recursive split. Recursing with Parallel.Invoke blocks a pool
         // thread at every internal node waiting on its children, which starves the pool: it was
         // 2.4x slower than the old scheduler at 1 MB even though it balanced the leaves perfectly.
         int totalChunks = (input.Length + chunkLen - 1) / chunkLen;
-        int targetUnits = Math.Max(2, Environment.ProcessorCount * 4);
+        int targetUnits = Math.Max(2, degree * 4);
 
         // Unit size is a power of two so every unit is a canonical subtree and its chaining value
         // needs no special casing. 16 chunks is the floor: smaller units lose to hand-off cost.
@@ -115,7 +128,13 @@ internal static class Blake3Tree
                 int fu = fullUnits;
                 int tb = tailBytes;
 
-                Parallel.For(0, units, i =>
+                // Uncapped keeps the allocation-free overload; the options object only appears on
+                // the path that asked for a limit.
+                var options = maxDegreeOfParallelism > 0
+                    ? new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism }
+                    : null;
+
+                Action<int> body = i =>
                 {
                     int length = i < fu ? ub : tb;
                     SubtreeCvSerial(
@@ -123,7 +142,16 @@ internal static class Blake3Tree
                         new ReadOnlySpan<uint>((void*)keyAddr, 8),
                         (ulong)i * (ulong)uc, f,
                         new Span<uint>((void*)(cvAddr + (nint)i * 8 * sizeof(uint)), 8));
-                });
+                };
+
+                if (options is null)
+                {
+                    Parallel.For(0, units, body);
+                }
+                else
+                {
+                    Parallel.For(0, units, options, body);
+                }
             }
 
             // Fold the unit chaining values left to right, carrying an odd one up unchanged. That

@@ -279,9 +279,9 @@ internal static class Blake3Core
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void HashLargeParallel(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        uint flags, Span<byte> output)
+        uint flags, Span<byte> output, int maxDegreeOfParallelism = -1)
     {
-        Blake3Tree.HashAllAtOnceParallel(input, key, flags, output);
+        Blake3Tree.HashAllAtOnceParallel(input, key, flags, output, maxDegreeOfParallelism);
     }
 
     /// <summary>

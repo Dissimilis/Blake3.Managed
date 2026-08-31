@@ -75,13 +75,20 @@ xof.Finalize(extendedOutput); // arbitrary length output
 using var parallel = Hasher.New();
 parallel.UpdateWithJoin(largeData); // uses thread pool above ~72 KiB
 var parallelHash = parallel.Finalize();
+
+// Capping how many threads the one-shot Hasher.Hash may use
+// (process-wide; does not affect UpdateWithJoin, and never changes the digest)
+Hasher.MaxDegreeOfParallelism = 4;  // at most 4 threads
+Hasher.MaxDegreeOfParallelism = 1;  // caller's thread only; use when you are
+                                    // already parallelising over many inputs
+Hasher.MaxDegreeOfParallelism = -1; // default: let the thread pool decide
 ```
 
 ## Public API
 
 | Type | Description |
 |------|-------------|
-| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` for one-shot. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. |
+| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` for one-shot. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()`. |
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
