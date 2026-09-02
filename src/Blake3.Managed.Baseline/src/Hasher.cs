@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using Blake3.Managed.Internal;
 
 namespace Blake3.Managed;
@@ -13,6 +14,40 @@ public unsafe struct Hasher : IDisposable
 {
     private Blake3Core.HasherState _state;
     private bool _initialized;
+
+    private static int s_maxDegreeOfParallelism = -1;
+
+    /// <summary>
+    /// The most threads <see cref="Hash(ReadOnlySpan{byte})"/> may use for a large input.
+    /// -1, the default, lets the thread pool decide; 1 hashes on the calling thread only.
+    /// </summary>
+    /// <remarks>
+    /// This is process-wide, and a hint rather than a guarantee: the value is passed to the
+    /// <see cref="System.Threading.Tasks.Parallel"/> fan-out, which still runs on the shared
+    /// thread pool. Setting it to 1 is the stronger statement -- that path skips the pool
+    /// entirely and runs the serial tree, which is what a caller who is already parallelising
+    /// over many inputs wants, since nesting two fan-outs on one pool costs more than it buys.
+    ///
+    /// The value never affects the digest. Every unit the parallel path hashes is a canonical
+    /// power-of-two subtree, so the tree shape is the same however the work is divided.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is 0 or below -1.
+    /// </exception>
+    public static int MaxDegreeOfParallelism
+    {
+        get => Volatile.Read(ref s_maxDegreeOfParallelism);
+        set
+        {
+            if (value == 0 || value < -1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value,
+                    "MaxDegreeOfParallelism must be -1 (unlimited) or a positive number.");
+            }
+
+            Volatile.Write(ref s_maxDegreeOfParallelism, value);
+        }
+    }
 
     [Obsolete("Use New() to create a new instance of Hasher", true)]
     public Hasher()
@@ -41,31 +76,44 @@ public unsafe struct Hasher : IDisposable
         // measurable when the whole call is under 100 ns.
         Unsafe.SkipInit(out Blake3.Managed.Hash hash);
 
+        // Snapshotted once: the branch below and the value handed to the parallel path must be
+        // the same reading, or a concurrent setter could send a call that took the "serial"
+        // branch into the pool uncapped. It cannot change the digest either way, only the
+        // schedule, but a call should honour one setting rather than two.
+        int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
+
         if (input.Length <= Blake3Constants.BlockLen && CompressSse41.IsSupported)
         {
             // The most common shape by far: one block, unkeyed. Dispatched here rather than
             // through Blake3Core so the whole hash is a single call into the compressor.
-            CompressSse41.CompressRootIvSingleBlock(input,
-                MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+            CompressSse41.CompressRootIvSingleBlock(input, hash.AsWordSpan());
+        }
+        else if (input.Length <= 2 * Blake3Constants.BlockLen && CompressSse41.IsSupported)
+        {
+            // Exactly two blocks: fully unrolled, every flag a compile-time constant.
+            CompressSse41.CompressRootIvTwoBlocks(input, hash.AsWordSpan());
         }
         else if (input.Length <= Blake3Constants.ChunkLen && CompressSse41.IsSupported)
         {
             // Multi-block single chunk, unkeyed: straight to the fused chunk loop, same reason.
-            CompressSse41.HashChunkRoot32Iv(input, MemoryMarshal.Cast<byte, uint>(hash.AsSpan()));
+            CompressSse41.HashChunkRoot32Iv(input, hash.AsWordSpan());
         }
         else if (input.Length <= Blake3Constants.ChunkLen)
         {
             Blake3Core.HashOneChunkRoot32(Blake3Constants.IV, 0, 0, hash.AsSpan(), input);
         }
-        else if (input.Length <= Blake3Tree.MaxUsefulLength)
+        else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
         {
-            // Wide-frontier tree: compresses parents in batches instead of one at a time. Only
-            // used below the size where the thread-pool path takes over.
+            // Wide-frontier tree: compresses parents in batches instead of one at a time. Used
+            // below the size where the thread-pool path takes over, and at any size when the
+            // caller has capped parallelism at one -- a pool with a single thread would do the
+            // same work plus the hand-off.
             Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
         }
         else
         {
-            HashMultiChunk(input, hash.AsSpan());
+            Blake3Core.HashLargeParallel(input, Blake3Constants.IV, 0, hash.AsSpan(),
+                degree);
         }
 
         return hash;
@@ -79,34 +127,44 @@ public unsafe struct Hasher : IDisposable
     [SkipLocalsInit]
     public static void Hash(ReadOnlySpan<byte> input, Span<byte> output)
     {
-        if (input.Length <= Blake3Constants.ChunkLen && output.Length <= 64)
+        int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
+
+        // Dispatch on input length first. Splitting on output length at the top left a hole:
+        // a single-chunk input asking for more than 64 output bytes matched neither the
+        // single-chunk branch nor the multi-chunk one, and fell through to a tree builder that
+        // cannot describe a sub-chunk input.
+        if (input.Length <= Blake3Constants.ChunkLen)
         {
-            Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
+            if (output.Length <= 64)
+            {
+                Blake3Core.HashOneChunk(Blake3Constants.IV, 0, 0, output, input);
+            }
+            else
+            {
+                // Extended output from one chunk needs the chunk's full Output state, which only
+                // the incremental path produces.
+                HashViaState(input, output);
+            }
         }
-        else if (input.Length > Blake3Constants.ChunkLen && input.Length <= Blake3Tree.MaxUsefulLength)
+        else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
         {
             Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
         }
         else
         {
-            HashMultiChunk(input, output);
+            Blake3Core.HashLargeParallel(input, Blake3Constants.IV, 0, output,
+                degree);
         }
     }
 
     /// <summary>
-    /// The multi-chunk path, deliberately kept out of line.
+    /// Hashes through the incremental state. Used where the tree builders do not apply.
     /// </summary>
-    /// <remarks>
-    /// HasherState embeds a 54-entry chaining-value stack, about 1.8 KB. A local of that type
-    /// anywhere in a method forces every call through that method to carry the frame, even when
-    /// the branch is not taken -- which cost roughly 40 ns on a 4-byte hash, close to half the
-    /// total. Hoisting it into its own method leaves the short-input paths with a small frame.
-    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void HashMultiChunk(ReadOnlySpan<byte> input, Span<byte> output)
+    private static void HashViaState(ReadOnlySpan<byte> input, Span<byte> output)
     {
         var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
-        state.UpdateWithJoin(input);
+        state.Update(input);
         var finalOutput = state.Finalize();
         finalOutput.RootOutputBytes(output);
     }

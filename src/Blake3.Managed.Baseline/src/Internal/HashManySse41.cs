@@ -75,6 +75,64 @@ internal static class HashManySse41
     }
 
     /// <summary>
+    /// Four independent G functions, interleaved phase by phase. See the AVX2 kernel's G256x4 for
+    /// why: a single G is a serial chain, and RyuJIT does not reschedule across four of them.
+    /// The four G functions of a round act on disjoint state, so this cannot change the result.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void G128x4(
+        ref Vector128<uint> a0, ref Vector128<uint> b0, ref Vector128<uint> c0, ref Vector128<uint> d0,
+        ref Vector128<uint> a1, ref Vector128<uint> b1, ref Vector128<uint> c1, ref Vector128<uint> d1,
+        ref Vector128<uint> a2, ref Vector128<uint> b2, ref Vector128<uint> c2, ref Vector128<uint> d2,
+        ref Vector128<uint> a3, ref Vector128<uint> b3, ref Vector128<uint> c3, ref Vector128<uint> d3,
+        Vector128<uint> m0x, Vector128<uint> m0y,
+        Vector128<uint> m1x, Vector128<uint> m1y,
+        Vector128<uint> m2x, Vector128<uint> m2y,
+        Vector128<uint> m3x, Vector128<uint> m3y)
+    {
+        a0 = Sse2.Add(Sse2.Add(a0, b0), m0x);
+        a1 = Sse2.Add(Sse2.Add(a1, b1), m1x);
+        a2 = Sse2.Add(Sse2.Add(a2, b2), m2x);
+        a3 = Sse2.Add(Sse2.Add(a3, b3), m3x);
+
+        d0 = RotateRight16(Sse2.Xor(d0, a0));
+        d1 = RotateRight16(Sse2.Xor(d1, a1));
+        d2 = RotateRight16(Sse2.Xor(d2, a2));
+        d3 = RotateRight16(Sse2.Xor(d3, a3));
+
+        c0 = Sse2.Add(c0, d0);
+        c1 = Sse2.Add(c1, d1);
+        c2 = Sse2.Add(c2, d2);
+        c3 = Sse2.Add(c3, d3);
+
+        b0 = RotateRight12(Sse2.Xor(b0, c0));
+        b1 = RotateRight12(Sse2.Xor(b1, c1));
+        b2 = RotateRight12(Sse2.Xor(b2, c2));
+        b3 = RotateRight12(Sse2.Xor(b3, c3));
+
+        a0 = Sse2.Add(Sse2.Add(a0, b0), m0y);
+        a1 = Sse2.Add(Sse2.Add(a1, b1), m1y);
+        a2 = Sse2.Add(Sse2.Add(a2, b2), m2y);
+        a3 = Sse2.Add(Sse2.Add(a3, b3), m3y);
+
+        d0 = RotateRight8(Sse2.Xor(d0, a0));
+        d1 = RotateRight8(Sse2.Xor(d1, a1));
+        d2 = RotateRight8(Sse2.Xor(d2, a2));
+        d3 = RotateRight8(Sse2.Xor(d3, a3));
+
+        c0 = Sse2.Add(c0, d0);
+        c1 = Sse2.Add(c1, d1);
+        c2 = Sse2.Add(c2, d2);
+        c3 = Sse2.Add(c3, d3);
+
+        b0 = RotateRight7(Sse2.Xor(b0, c0));
+        b1 = RotateRight7(Sse2.Xor(b1, c1));
+        b2 = RotateRight7(Sse2.Xor(b2, c2));
+        b3 = RotateRight7(Sse2.Xor(b3, c3));
+    }
+
+
+    /// <summary>
     /// 4x4 transpose: converts 4 rows where each lane is from a different chunk
     /// into 4 columns where each lane is a word from the same chunk.
     /// </summary>
@@ -171,69 +229,138 @@ internal static class HashManySse41
                 Vector128<uint> s14 = blockLenVec, s15 = flagsVec;
 
                 // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-                G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[0], m[1],
+                    m[2], m[3],
+                    m[4], m[5],
+                    m[6], m[7]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[8], m[9],
+                    m[10], m[11],
+                    m[12], m[13],
+                    m[14], m[15]);
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-                G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[2], m[6],
+                    m[3], m[10],
+                    m[7], m[0],
+                    m[4], m[13]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[1], m[11],
+                    m[12], m[5],
+                    m[9], m[14],
+                    m[15], m[8]);
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-                G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[3], m[4],
+                    m[10], m[12],
+                    m[13], m[2],
+                    m[7], m[14]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[6], m[5],
+                    m[9], m[0],
+                    m[11], m[15],
+                    m[8], m[1]);
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-                G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[10], m[7],
+                    m[12], m[9],
+                    m[14], m[3],
+                    m[13], m[15]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[4], m[0],
+                    m[11], m[2],
+                    m[5], m[8],
+                    m[1], m[6]);
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-                G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[12], m[13],
+                    m[9], m[11],
+                    m[15], m[10],
+                    m[14], m[8]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[7], m[2],
+                    m[5], m[3],
+                    m[0], m[1],
+                    m[6], m[4]);
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-                G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[9], m[14],
+                    m[11], m[5],
+                    m[8], m[12],
+                    m[15], m[1]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[13], m[3],
+                    m[0], m[10],
+                    m[2], m[6],
+                    m[4], m[7]);
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-                G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
-
+                G128x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[11], m[15],
+                    m[5], m[0],
+                    m[1], m[9],
+                    m[8], m[6]);
+                G128x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[14], m[10],
+                    m[2], m[12],
+                    m[3], m[4],
+                    m[7], m[13]);
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = Sse2.Xor(s0, s8);
                 cv1 = Sse2.Xor(s1, s9);

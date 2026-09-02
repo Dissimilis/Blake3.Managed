@@ -121,6 +121,60 @@ internal static class CompressSse41
     }
 
     /// <summary>
+    /// Root hash of a 65..128 byte input in default unkeyed mode: exactly two blocks.
+    /// </summary>
+    /// <remarks>
+    /// The general chunk loop carries a loop branch, builds its state row from a loop-carried flag
+    /// so the row cannot be folded, and tests each block to see whether it is the last. With two
+    /// blocks all of that is known at compile time: the first block is CHUNK_START, the second is
+    /// CHUNK_END | ROOT, and only the final block length varies. Inputs in this range are common
+    /// enough -- short strings, keys, identifiers -- to be worth their own path.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void CompressRootIvTwoBlocks(ReadOnlySpan<byte> input, Span<uint> chainingValue)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+
+        ref byte src = ref MemoryMarshal.GetReference(input);
+
+        // First block: always full, always CHUNK_START.
+        var r0 = ivRow;
+        var r1 = Vector128.Create(Blake3Constants.Iv4, Blake3Constants.Iv5,
+            Blake3Constants.Iv6, Blake3Constants.Iv7);
+        var r2 = ivRow;
+        var r3 = Vector128.Create(0u, 0u, (uint)Blake3Constants.BlockLen, Blake3Constants.ChunkStart);
+
+        DoRoundsShuffle(ref r0, ref r1, ref r2, ref r3,
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref src),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 16)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 32)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 48)));
+
+        // The chaining value stays in registers between the two blocks.
+        var cv0 = Sse2.Xor(r0, r2);
+        var cv1 = Sse2.Xor(r1, r3);
+
+        // Second block: the last one, so CHUNK_END | ROOT. Only its length varies.
+        int lastLen = input.Length - Blake3Constants.BlockLen;
+        LoadPaddedBlock(input.Slice(Blake3Constants.BlockLen), out var m0, out var m1,
+            out var m2, out var m3);
+
+        var f0 = cv0;
+        var f1 = cv1;
+        var f2 = ivRow;
+        var f3 = Vector128.Create(0u, 0u, (uint)lastLen,
+            Blake3Constants.ChunkEnd | Blake3Constants.Root);
+
+        DoRoundsShuffle(ref f0, ref f1, ref f2, ref f3, m0, m1, m2, m3);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(chainingValue);
+        VectorCompat.Store(Sse2.Xor(f0, f2), ref outRef);
+        VectorCompat.Store(Sse2.Xor(f1, f3), ref outRef, 4);
+    }
+
+    /// <summary>
     /// Hashes a whole chunk (0..1024 bytes) in default unkeyed mode, producing the 32-byte digest.
     /// </summary>
     /// <remarks>

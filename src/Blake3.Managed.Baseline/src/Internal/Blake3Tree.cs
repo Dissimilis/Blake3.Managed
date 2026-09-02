@@ -1,5 +1,8 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Blake3.Managed.Internal;
 
@@ -29,10 +32,15 @@ internal static class Blake3Tree
         : 1;
 
     /// <summary>
-    /// Largest input this handles well. Above it the thread-pool path wins outright, and this
-    /// deliberately does not compete with it.
+    /// Largest input the serial tree handles before the parallel one takes over.
     /// </summary>
     internal const int MaxUsefulLength = 72 * Blake3Constants.ChunkLen;
+
+    /// <summary>
+    /// Smallest subtree given its own task. Below this the thread-pool hand-off costs more than
+    /// the work saved.
+    /// </summary>
+    private const int MinParallelSubtree = 16 * Blake3Constants.ChunkLen;
 
     /// <summary>
     /// Hashes <paramref name="input"/> (which must be longer than one chunk) and writes root
@@ -49,6 +57,194 @@ internal static class Blake3Tree
         var rootOutput = new Blake3Core.Output();
         rootOutput.Init(key, parentBlock, 0, Blake3Constants.BlockLen, flags | Blake3Constants.Parent);
         rootOutput.RootOutputBytes(output);
+    }
+
+
+    /// <summary>
+    /// Hashes a large input, splitting the tree across the thread pool.
+    /// </summary>
+    /// <remarks>
+    /// Splits at the canonical left-subtree boundary and recurses on both halves concurrently, so
+    /// every task gets an equal share. The previous scheme reserved one 64-chunk subtree per task
+    /// and handed the remainder out as 8-chunk batches, which at 128 KB produced one task doing
+    /// eight times the work of the other seven -- the critical path was a single 64-chunk task, and
+    /// the wall clock showed it.
+    ///
+    /// Splitting at <see cref="LeftSubtreeLength"/> keeps every left side a complete power-of-two
+    /// subtree, so its chaining value is canonical and the tree shape is unchanged.
+    /// </remarks>
+    [SkipLocalsInit]
+    internal static unsafe void HashAllAtOnceParallel(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        uint flags, Span<byte> output, int maxDegreeOfParallelism = -1)
+    {
+        const int chunkLen = Blake3Constants.ChunkLen;
+
+        // A cap has to reach the unit sizing as well as the loop. Capping only the loop would
+        // still cut the input into ProcessorCount * 4 units and then push them through fewer
+        // threads, paying the hand-off cost for parallelism that was asked not to happen.
+        //
+        // Clamped to the core count: a cap above it is a ceiling on threads, not a reason to cut
+        // the input finer than the machine can actually run. It also keeps the arithmetic below
+        // in range -- degree * 4 * 2 overflowed for very large caps, wrapping the loop bound
+        // negative, growing units until the whole input was one unit, and then faulting in the
+        // two-CV root fold.
+        int degree = maxDegreeOfParallelism > 0
+            ? Math.Min(maxDegreeOfParallelism, Environment.ProcessorCount)
+            : Environment.ProcessorCount;
+
+        // One flat fan-out, not a recursive split. Recursing with Parallel.Invoke blocks a pool
+        // thread at every internal node waiting on its children, which starves the pool: it was
+        // 2.4x slower than the old scheduler at 1 MB even though it balanced the leaves perfectly.
+        int totalChunks = (input.Length + chunkLen - 1) / chunkLen;
+        int targetUnits = Math.Max(2, degree * 4);
+
+        // Unit size is a power of two so every unit is a canonical subtree and its chaining value
+        // needs no special casing. 16 chunks is the floor: smaller units lose to hand-off cost.
+        int unitChunks = 16;
+        while (totalChunks / unitChunks > targetUnits * 2 && unitChunks < 4096)
+        {
+            unitChunks *= 2;
+        }
+
+        int unitBytes = unitChunks * chunkLen;
+        int fullUnits = input.Length / unitBytes;
+        int tailBytes = input.Length - fullUnits * unitBytes;
+        int units = fullUnits + (tailBytes > 0 ? 1 : 0);
+
+        var cvBuffer = ArrayPool<uint>.Shared.Rent(units * 8);
+        try
+        {
+            fixed (byte* inputPtr = input)
+            fixed (uint* keyPtr = key)
+            fixed (uint* cvPtr = cvBuffer)
+            {
+                // Addresses travel as nint: a pointer local cannot cross a lambda boundary.
+                nint inputAddr = (nint)inputPtr;
+                nint keyAddr = (nint)keyPtr;
+                nint cvAddr = (nint)cvPtr;
+                uint f = flags;
+                int ub = unitBytes;
+                int uc = unitChunks;
+                int fu = fullUnits;
+                int tb = tailBytes;
+
+                // Uncapped keeps the allocation-free overload; the options object only appears on
+                // the path that asked for a limit.
+                var options = maxDegreeOfParallelism > 0
+                    ? new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism }
+                    : null;
+
+                Action<int> body = i =>
+                {
+                    int length = i < fu ? ub : tb;
+                    SubtreeCvSerial(
+                        new ReadOnlySpan<byte>((void*)(inputAddr + (nint)i * ub), length),
+                        new ReadOnlySpan<uint>((void*)keyAddr, 8),
+                        (ulong)i * (ulong)uc, f,
+                        new Span<uint>((void*)(cvAddr + (nint)i * 8 * sizeof(uint)), 8));
+                };
+
+                if (options is null)
+                {
+                    Parallel.For(0, units, body);
+                }
+                else
+                {
+                    Parallel.For(0, units, options, body);
+                }
+            }
+
+            // Fold the unit chaining values left to right, carrying an odd one up unchanged. That
+            // pairing reproduces BLAKE3's canonical tree for any number of units, and stopping at
+            // two leaves exactly the root's children so the final parent can carry ROOT.
+            Span<uint> cvs = cvBuffer.AsSpan(0, units * 8);
+            Span<uint> scratch = stackalloc uint[16 * 8];
+
+            int numCvs = units;
+            while (numCvs > 2)
+            {
+                int produced = CompressParentsGeneral(cvs, numCvs, key, flags, scratch, cvs);
+                numCvs = produced;
+            }
+
+            Span<uint> parentBlock = stackalloc uint[16];
+            cvs.Slice(0, 16).CopyTo(parentBlock);
+
+            var rootOutput = new Blake3Core.Output();
+            rootOutput.Init(key, parentBlock, 0, Blake3Constants.BlockLen,
+                flags | Blake3Constants.Parent);
+            rootOutput.RootOutputBytes(output);
+        }
+        finally
+        {
+            ArrayPool<uint>.Shared.Return(cvBuffer);
+        }
+    }
+
+    /// <summary>
+    /// One parent level over an arbitrary number of chaining values, written back in place.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CompressParents"/> requires 16-CV buffers so it can run the 8-way kernel over a
+    /// short tail; here the count can be far larger, so batches of eight are done through the
+    /// kernel and whatever remains through scratch or scalar compression.
+    /// </remarks>
+    private static int CompressParentsGeneral(Span<uint> cvs, int numChildren, ReadOnlySpan<uint> key,
+        uint flags, Span<uint> scratch, Span<uint> outCvs)
+    {
+        uint parentFlags = flags | Blake3Constants.Parent;
+        int numParents = numChildren / 2;
+        int p = 0;
+
+        if (HashManyAvx2.IsSupported)
+        {
+            for (; p + 8 <= numParents; p += 8)
+            {
+                // Copy the children out first: output overlaps input when folding in place.
+                cvs.Slice(p * 16, 128).CopyTo(scratch);
+                HashManyAvx2.HashParents8(scratch, key, parentFlags, outCvs.Slice(p * 8, 64));
+            }
+        }
+
+        for (; p < numParents; p++)
+        {
+            cvs.Slice(p * 16, 16).CopyTo(scratch);
+            Blake3Core.CompressCv(key, scratch.Slice(0, 16), 0, Blake3Constants.BlockLen,
+                parentFlags, outCvs.Slice(p * 8, 8));
+        }
+
+        if ((numChildren & 1) != 0)
+        {
+            cvs.Slice(numParents * 16, 8).CopyTo(scratch);
+            scratch.Slice(0, 8).CopyTo(outCvs.Slice(numParents * 8, 8));
+            return numParents + 1;
+        }
+
+        return numParents;
+    }
+
+    /// <summary>
+    /// Reduces a subtree to one chaining value on this thread, using the wide SIMD frontier.
+    /// </summary>
+    [SkipLocalsInit]
+    private static void SubtreeCvSerial(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        ulong chunkCounter, uint flags, Span<uint> outCv)
+    {
+        Span<uint> a = stackalloc uint[16 * 8];
+        Span<uint> b = stackalloc uint[16 * 8];
+
+        int numCvs = CompressSubtreeWide(input, key, chunkCounter, flags, a);
+
+        bool inA = true;
+        while (numCvs > 1)
+        {
+            numCvs = inA
+                ? CompressParents(a, numCvs, key, flags, b)
+                : CompressParents(b, numCvs, key, flags, a);
+            inA = !inA;
+        }
+
+        (inA ? a : b).Slice(0, 8).CopyTo(outCv);
     }
 
     /// <summary>
@@ -218,6 +414,20 @@ internal static class Blake3Tree
             {
                 HashManyAvx2.HashParents8(children.Slice(p * 16, 128), key, parentFlags,
                     outCvs.Slice(p * 8, 64));
+            }
+
+            // A tail of 3..7 parents still goes through the 8-way kernel, computing lanes we then
+            // ignore. One vector compression beats three or more scalar ones even with the waste,
+            // and this is the common case: at 8 KB the tree has 8 children, so four parents, which
+            // previously fell through to scalar and cost more than the chunk hashing it followed.
+            //
+            // Safe without staging because every caller's CV buffer holds 16 CVs (128 words) and a
+            // tail can only occur at p == 0, since numParents never exceeds 8 here.
+            if (numParents - p >= 3 && children.Length >= 128 && outCvs.Length >= 64)
+            {
+                HashManyAvx2.HashParents8(children.Slice(p * 16, 128), key, parentFlags,
+                    outCvs.Slice(p * 8, 64));
+                p = numParents;
             }
         }
 

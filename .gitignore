@@ -43,3 +43,6 @@ source.tar.gz
 # AI tooling
 .claude/
 .serena/
+
+# Local scratch notes
+*.local.md
