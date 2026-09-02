@@ -82,6 +82,17 @@ Hasher.MaxDegreeOfParallelism = 4;  // at most 4 threads
 Hasher.MaxDegreeOfParallelism = 1;  // caller's thread only; use when you are
                                     // already parallelising over many inputs
 Hasher.MaxDegreeOfParallelism = -1; // default: let the thread pool decide
+
+// Hashing pieces of one input on your own threads, in any order, and folding
+// them into the digest a whole-input hash would produce
+using var ctx = Blake3SubtreeContext.Create(pieceSize: 1024 * 1024, totalLength: file.Length);
+var pieces = new Blake3Subtree[ctx.PieceCount];
+Parallel.For(0, ctx.PieceCount, i =>
+{
+    var piece = ReadPiece(file, ctx.GetPieceOffset(i), ctx.GetPieceLength(i));
+    pieces[i] = ctx.HashSubtree(piece, i);
+});
+var fileHash = ctx.Finalize(pieces); // equals Hasher.Hash(wholeFile)
 ```
 
 ## Public API
@@ -92,6 +103,8 @@ Hasher.MaxDegreeOfParallelism = -1; // default: let the thread pool decide
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
+| `Blake3SubtreeContext` | Hashes fixed-size pieces of one input independently, on any threads and in any order, and folds them into the whole-input digest (32 bytes or XOF). Piece size must be a power-of-two multiple of 1024. |
+| `Blake3Subtree` | Opaque result of hashing one piece, stored at its piece index and passed to `Finalize`. |
 
 ## Performance
 
