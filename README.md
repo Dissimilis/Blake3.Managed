@@ -15,6 +15,7 @@ BLAKE3 is a modern, secure hash ideal for file checksums, content addressing, de
 - **Pure managed C#** - no native libraries, no P/Invoke, runs everywhere .NET runs
 - **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
 - **Multi-threaded** - one-shot `Hash()`, `Blake3HashAlgorithm` and `Blake3Stream` hash 64-chunk subtrees on the thread pool for inputs above ~72 KiB
+- **Split hashing** - hash pieces of one file or download on different threads, machines, or at different times, then combine the pieces into the same hash you would get from hashing the whole thing at once (`Blake3SubtreeContext`)
 - **Zero allocation** for small inputs - one-shot `Hasher.Hash()` uses stack allocation
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
 - **XOF support** - extendable output with seekable byte stream
