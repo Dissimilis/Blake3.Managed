@@ -36,12 +36,6 @@ internal static class Blake3Tree
     internal const int MaxUsefulLength = 72 * Blake3Constants.ChunkLen;
 
     /// <summary>
-    /// Smallest subtree given its own task. Below this the thread-pool hand-off costs more than
-    /// the work saved.
-    /// </summary>
-    private const int MinParallelSubtree = 16 * Blake3Constants.ChunkLen;
-
-    /// <summary>
     /// Hashes <paramref name="input"/> (which must be longer than one chunk) and writes root
     /// output bytes, of any length, to <paramref name="output"/>.
     /// </summary>
@@ -174,7 +168,11 @@ internal static class Blake3Tree
         private readonly int _items;
         private int _next;
         private int _done;
-        private ManualResetEventSlim? _event;
+        private Exception? _exception;
+
+        // Allocated before any worker is queued: a failed allocation afterwards would leave
+        // workers holding pointers whose owner has already unwound.
+        private readonly ManualResetEventSlim _event = new(false);
 
         protected FlatJob(int items)
         {
@@ -183,16 +181,36 @@ internal static class Blake3Tree
 
         protected abstract void Process(int item);
 
+        /// <summary>
+        /// Runs every item and returns only once all of them are settled, whatever happens.
+        /// </summary>
+        /// <remarks>
+        /// The pinned addresses the items read are valid only until this returns, so nothing
+        /// may leave early: a failed enqueue or a throwing item still drains the remaining
+        /// units and waits for the workers already running before the exception surfaces.
+        /// </remarks>
         public void RunOnPool(int degree)
         {
             int workers = Math.Min(degree, _items) - 1;
-            for (int w = 0; w < workers; w++)
+            try
             {
-                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+                for (int w = 0; w < workers; w++)
+                {
+                    ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.CompareExchange(ref _exception, ex, null);
             }
 
             Execute();
             WaitAll();
+
+            if (_exception is { } failure)
+            {
+                throw failure;
+            }
         }
 
         public void Execute()
@@ -203,13 +221,23 @@ internal static class Blake3Tree
                 int i = Interlocked.Increment(ref _next) - 1;
                 if (i >= _items) break;
 
-                Process(i);
+                try
+                {
+                    Process(i);
+                }
+                catch (Exception ex)
+                {
+                    // Keep draining: every claimed item must be settled before the caller may
+                    // release the memory the items point into.
+                    Interlocked.CompareExchange(ref _exception, ex, null);
+                }
+
                 completed++;
             }
 
             if (completed > 0 && Interlocked.Add(ref _done, completed) == _items)
             {
-                Volatile.Read(ref _event)?.Set();
+                _event.Set();
             }
         }
 
@@ -220,13 +248,7 @@ internal static class Blake3Tree
             {
                 if (spinner.NextSpinWillYield)
                 {
-                    var ev = new ManualResetEventSlim(false);
-                    var prior = Interlocked.CompareExchange(ref _event, ev, null);
-                    if (prior is not null) ev = prior;
-
-                    // Re-check after publishing: a worker that finished between the read above
-                    // and the publish never saw the event and will not signal it.
-                    if (Volatile.Read(ref _done) < _items) ev.Wait();
+                    _event.Wait();
                     return;
                 }
 
