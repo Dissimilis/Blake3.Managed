@@ -51,7 +51,7 @@ internal static class Blake3Tree
         Span<byte> output)
     {
         Span<uint> parentBlock = stackalloc uint[16];
-        CompressSubtreeToParentBlock(input, key, flags, parentBlock);
+        CompressSubtreeToParentBlock(input, key, 0, flags, parentBlock);
 
         // The root is the final parent node: two CVs as its message, with ROOT applied by Output.
         var rootOutput = new Blake3Core.Output();
@@ -248,18 +248,87 @@ internal static class Blake3Tree
     }
 
     /// <summary>
+    /// Reduces one canonical subtree to the description of its top node, rather than to a chaining
+    /// value.
+    /// </summary>
+    /// <remarks>
+    /// A chaining value is lossy: <see cref="Blake3Core.Output"/> retains the input CV, block,
+    /// counter, block length and flags, and ROOT has to be applied when that node is compressed,
+    /// not afterwards. Callers that may end up holding the root itself -- a single-subtree input --
+    /// or that want extended output therefore need the node, not its CV. Fold several of these
+    /// with <see cref="RootFromCvs"/>, taking each one's
+    /// <see cref="Blake3Core.Output.ChainingValue"/>.
+    ///
+    /// <paramref name="chunkCounter"/> is the index of the subtree's first chunk in the whole
+    /// input. The subtree must be canonical: a power-of-two number of chunks starting at a
+    /// multiple of that count, or a short trailing subtree.
+    /// </remarks>
+    [SkipLocalsInit]
+    internal static void SubtreeOutput(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        ulong chunkCounter, uint flags, out Blake3Core.Output output)
+    {
+        if (input.Length <= Blake3Constants.ChunkLen)
+        {
+            // One chunk, whole or partial. The chunk state leaves the final block uncompressed,
+            // which is exactly the state the output needs.
+            var chunk = new Blake3Core.ChunkState(key, chunkCounter, flags);
+            chunk.Update(input);
+            output = chunk.CreateOutput();
+            return;
+        }
+
+        Span<uint> parentBlock = stackalloc uint[16];
+        CompressSubtreeToParentBlock(input, key, chunkCounter, flags, parentBlock);
+
+        output = new Blake3Core.Output();
+        output.Init(key, parentBlock, 0, Blake3Constants.BlockLen, flags | Blake3Constants.Parent);
+    }
+
+    /// <summary>
+    /// Folds two or more subtree chaining values into root output bytes of any length, starting at
+    /// <paramref name="seekOffset"/> in the output stream.
+    /// </summary>
+    /// <remarks>
+    /// The same left-to-right fold <see cref="HashAllAtOnceParallel"/> applies to its unit CVs, so
+    /// the digest matches a single-threaded hash of the same input. <paramref name="cvs"/> is
+    /// consumed in place.
+    /// </remarks>
+    [SkipLocalsInit]
+    internal static void RootFromCvs(Span<uint> cvs, int numCvs, ReadOnlySpan<uint> key, uint flags,
+        ulong seekOffset, Span<byte> output)
+    {
+        Span<uint> scratch = stackalloc uint[16 * 8];
+
+        while (numCvs > 2)
+        {
+            numCvs = CompressParentsGeneral(cvs, numCvs, key, flags, scratch, cvs);
+        }
+
+        Span<uint> parentBlock = stackalloc uint[16];
+        cvs.Slice(0, 16).CopyTo(parentBlock);
+
+        var rootOutput = new Blake3Core.Output();
+        rootOutput.Init(key, parentBlock, 0, Blake3Constants.BlockLen, flags | Blake3Constants.Parent);
+        rootOutput.RootOutputBytesAt(seekOffset, output);
+    }
+
+    /// <summary>
     /// Reduces the whole input to exactly two chaining values, returned as one 16-word parent block.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="chunkCounter"/> is the index of the subtree's first chunk in the whole
+    /// input; it is zero for a whole-input hash and non-zero only for a caller-supplied subtree.
+    /// </remarks>
     [SkipLocalsInit]
     private static void CompressSubtreeToParentBlock(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        uint flags, Span<uint> parentBlock)
+        ulong chunkCounter, uint flags, Span<uint> parentBlock)
     {
         // Two buffers ping-ponged rather than allocating per level. CompressSubtreeWide returns at
         // most 8 CVs, so this halves 8 -> 4 -> 2 and never runs more than twice.
         Span<uint> a = stackalloc uint[16 * 8];
         Span<uint> b = stackalloc uint[16 * 8];
 
-        int numCvs = CompressSubtreeWide(input, key, 0, flags, a);
+        int numCvs = CompressSubtreeWide(input, key, chunkCounter, flags, a);
 
         bool inA = true;
         while (numCvs > 2)

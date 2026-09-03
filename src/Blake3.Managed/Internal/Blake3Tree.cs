@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace Blake3.Managed.Internal;
 
@@ -64,14 +63,16 @@ internal static class Blake3Tree
     /// Hashes a large input, splitting the tree across the thread pool.
     /// </summary>
     /// <remarks>
-    /// Splits at the canonical left-subtree boundary and recurses on both halves concurrently, so
-    /// every task gets an equal share. The previous scheme reserved one 64-chunk subtree per task
-    /// and handed the remainder out as 8-chunk batches, which at 128 KB produced one task doing
-    /// eight times the work of the other seven -- the critical path was a single 64-chunk task, and
-    /// the wall clock showed it.
+    /// The input is cut into equal power-of-two units so every unit is a canonical subtree and its
+    /// chaining value needs no special casing. Every worker is queued to the pool up front and the
+    /// units are claimed through one shared counter, with the calling thread working alongside.
     ///
-    /// Splitting at <see cref="LeftSubtreeLength"/> keeps every left side a complete power-of-two
-    /// subtree, so its chaining value is canonical and the tree shape is unchanged.
+    /// This replaced Parallel.For, which was 18-27% slower at every size from 128 KB to 10 MB in
+    /// a same-run comparison. Parallel.For starts one task and lets each running replica queue
+    /// the next, so on a job that lasts tens of microseconds most of the pool is still waking up
+    /// when the work runs out. Queueing all the workers at once from the calling thread releases
+    /// them together, and the shared counter keeps the balance dynamic. It also allocates about
+    /// a hundred bytes per call instead of 4 KB.
     /// </remarks>
     [SkipLocalsInit]
     internal static unsafe void HashAllAtOnceParallel(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
@@ -79,9 +80,9 @@ internal static class Blake3Tree
     {
         const int chunkLen = Blake3Constants.ChunkLen;
 
-        // A cap has to reach the unit sizing as well as the loop. Capping only the loop would
-        // still cut the input into ProcessorCount * 4 units and then push them through fewer
-        // threads, paying the hand-off cost for parallelism that was asked not to happen.
+        // A cap has to reach the unit sizing as well as the worker count. Capping only the workers
+        // would still cut the input into ProcessorCount * 4 units and then push them through
+        // fewer threads, paying the hand-off cost for parallelism that was asked not to happen.
         //
         // Clamped to the core count: a cap above it is a ceiling on threads, not a reason to cut
         // the input finer than the machine can actually run. It also keeps the arithmetic below
@@ -94,12 +95,12 @@ internal static class Blake3Tree
 
         // One flat fan-out, not a recursive split. Recursing with Parallel.Invoke blocks a pool
         // thread at every internal node waiting on its children, which starves the pool: it was
-        // 2.4x slower than the old scheduler at 1 MB even though it balanced the leaves perfectly.
+        // 2.4x slower than a flat schedule at 1 MB even though it balanced the leaves perfectly.
         int totalChunks = (input.Length + chunkLen - 1) / chunkLen;
         int targetUnits = Math.Max(2, degree * 4);
 
-        // Unit size is a power of two so every unit is a canonical subtree and its chaining value
-        // needs no special casing. 16 chunks is the floor: smaller units lose to hand-off cost.
+        // 16 chunks is the floor: 8-chunk units measured the same within noise, 4-chunk units
+        // measured worse at 128-256 KB. All logical cores measured better than any smaller cap.
         int unitChunks = 16;
         while (totalChunks / unitChunks > targetUnits * 2 && unitChunks < 4096)
         {
@@ -118,40 +119,19 @@ internal static class Blake3Tree
             fixed (uint* keyPtr = key)
             fixed (uint* cvPtr = cvBuffer)
             {
-                // Addresses travel as nint: a pointer local cannot cross a lambda boundary.
-                nint inputAddr = (nint)inputPtr;
-                nint keyAddr = (nint)keyPtr;
-                nint cvAddr = (nint)cvPtr;
-                uint f = flags;
-                int ub = unitBytes;
-                int uc = unitChunks;
-                int fu = fullUnits;
-                int tb = tailBytes;
-
-                // Uncapped keeps the allocation-free overload; the options object only appears on
-                // the path that asked for a limit.
-                var options = maxDegreeOfParallelism > 0
-                    ? new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism }
-                    : null;
-
-                Action<int> body = i =>
+                var job = new SubtreeJob(units)
                 {
-                    int length = i < fu ? ub : tb;
-                    SubtreeCvSerial(
-                        new ReadOnlySpan<byte>((void*)(inputAddr + (nint)i * ub), length),
-                        new ReadOnlySpan<uint>((void*)keyAddr, 8),
-                        (ulong)i * (ulong)uc, f,
-                        new Span<uint>((void*)(cvAddr + (nint)i * 8 * sizeof(uint)), 8));
+                    InputAddr = (nint)inputPtr,
+                    KeyAddr = (nint)keyPtr,
+                    CvAddr = (nint)cvPtr,
+                    Flags = flags,
+                    UnitBytes = unitBytes,
+                    UnitChunks = unitChunks,
+                    FullUnits = fullUnits,
+                    TailBytes = tailBytes,
                 };
 
-                if (options is null)
-                {
-                    Parallel.For(0, units, body);
-                }
-                else
-                {
-                    Parallel.For(0, units, options, body);
-                }
+                job.RunOnPool(degree);
             }
 
             // Fold the unit chaining values left to right, carrying an odd one up unchanged. That
@@ -163,8 +143,7 @@ internal static class Blake3Tree
             int numCvs = units;
             while (numCvs > 2)
             {
-                int produced = CompressParentsGeneral(cvs, numCvs, key, flags, scratch, cvs);
-                numCvs = produced;
+                numCvs = CompressParentsGeneral(cvs, numCvs, key, flags, scratch, cvs);
             }
 
             Span<uint> parentBlock = stackalloc uint[16];
@@ -178,6 +157,102 @@ internal static class Blake3Tree
         finally
         {
             ArrayPool<uint>.Shared.Return(cvBuffer);
+        }
+    }
+
+    /// <summary>
+    /// A fixed number of independent work items, claimed through one shared counter by the
+    /// calling thread plus pool workers that are all queued at once.
+    /// </summary>
+    /// <remarks>
+    /// The pinned addresses the items read are valid only until <see cref="RunOnPool"/> returns.
+    /// That is safe because it returns only after every item is done, and a worker scheduled
+    /// late finds the counter exhausted and touches nothing but the counter.
+    /// </remarks>
+    internal abstract class FlatJob : IThreadPoolWorkItem
+    {
+        private readonly int _items;
+        private int _next;
+        private int _done;
+        private ManualResetEventSlim? _event;
+
+        protected FlatJob(int items)
+        {
+            _items = items;
+        }
+
+        protected abstract void Process(int item);
+
+        public void RunOnPool(int degree)
+        {
+            int workers = Math.Min(degree, _items) - 1;
+            for (int w = 0; w < workers; w++)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+            }
+
+            Execute();
+            WaitAll();
+        }
+
+        public void Execute()
+        {
+            int completed = 0;
+            while (true)
+            {
+                int i = Interlocked.Increment(ref _next) - 1;
+                if (i >= _items) break;
+
+                Process(i);
+                completed++;
+            }
+
+            if (completed > 0 && Interlocked.Add(ref _done, completed) == _items)
+            {
+                Volatile.Read(ref _event)?.Set();
+            }
+        }
+
+        private void WaitAll()
+        {
+            var spinner = new SpinWait();
+            while (Volatile.Read(ref _done) < _items)
+            {
+                if (spinner.NextSpinWillYield)
+                {
+                    var ev = new ManualResetEventSlim(false);
+                    var prior = Interlocked.CompareExchange(ref _event, ev, null);
+                    if (prior is not null) ev = prior;
+
+                    // Re-check after publishing: a worker that finished between the read above
+                    // and the publish never saw the event and will not signal it.
+                    if (Volatile.Read(ref _done) < _items) ev.Wait();
+                    return;
+                }
+
+                spinner.SpinOnce();
+            }
+        }
+    }
+
+    private sealed unsafe class SubtreeJob : FlatJob
+    {
+        public nint InputAddr, KeyAddr, CvAddr;
+        public uint Flags;
+        public int UnitBytes, UnitChunks, FullUnits, TailBytes;
+
+        public SubtreeJob(int units) : base(units)
+        {
+        }
+
+        protected override void Process(int i)
+        {
+            int length = i < FullUnits ? UnitBytes : TailBytes;
+            SubtreeCvSerial(
+                new ReadOnlySpan<byte>((void*)(InputAddr + (nint)i * UnitBytes), length),
+                new ReadOnlySpan<uint>((void*)KeyAddr, 8),
+                (ulong)i * (ulong)UnitChunks, Flags,
+                new Span<uint>((void*)(CvAddr + (nint)i * 8 * sizeof(uint)), 8));
         }
     }
 
