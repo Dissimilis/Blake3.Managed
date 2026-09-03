@@ -136,11 +136,22 @@ public class Blake3SubtreeContextEdgeCaseTests
     }
 
     [Fact]
-    public void AcceptsTheLargestRepresentablePieceSize()
+    public void AcceptsAPieceSizeLargerThanASpanCanHold()
     {
-        // 1 GiB is 2^20 chunks: the largest power-of-two chunk count whose byte size fits an int.
-        using var ctx = Blake3SubtreeContext.Create(1 << 30);
-        Assert.Equal(1 << 30, ctx.PieceSize);
+        // 4 GiB: pieces beyond int range are hashed through CreateSubtreeHasher.
+        using var ctx = Blake3SubtreeContext.Create(4L << 30, totalLength: (4L << 30) + 5);
+        Assert.Equal(4L << 30, ctx.PieceSize);
+        Assert.Equal(2, ctx.PieceCount);
+        Assert.Equal(4L << 30, ctx.GetPieceLength(0));
+        Assert.Equal(5, ctx.GetPieceLength(1));
+    }
+
+    [Fact]
+    public void HashSubtreeExplainsWhenAPieceCannotFitASpan()
+    {
+        using var ctx = Blake3SubtreeContext.Create(4L << 30, totalLength: (4L << 30) + 5);
+        var ex = Assert.Throws<ArgumentException>(() => ctx.HashSubtree(new byte[16], 0));
+        Assert.Contains("CreateSubtreeHasher", ex.Message);
     }
 
     [Fact]
@@ -148,6 +159,9 @@ public class Blake3SubtreeContextEdgeCaseTests
     {
         Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(int.MinValue));
         Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(int.MaxValue));
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(0));
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(long.MaxValue));
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(long.MinValue));
     }
 
     [Fact]

@@ -127,7 +127,7 @@ public class Blake3SubtreeContextTests
         Parallel.ForEach(Enumerable.Range(0, ctx.PieceCount).Reverse(), i =>
         {
             pieces[i] = ctx.HashSubtree(
-                data.AsSpan((int)ctx.GetPieceOffset(i), ctx.GetPieceLength(i)), i);
+                data.AsSpan((int)ctx.GetPieceOffset(i), (int)ctx.GetPieceLength(i)), i);
         });
 
         Assert.Equal(Hasher.Hash(data).ToString(), ctx.Finalize(pieces).ToString());

@@ -18,7 +18,8 @@ namespace Blake3.Managed;
 ///
 /// The input is divided into fixed-size pieces, numbered from zero, all of
 /// <see cref="PieceSize"/> bytes except the last, which may be short. Hash piece <c>i</c> with
-/// <see cref="HashSubtree"/>, keep the result at index <c>i</c>, and pass them all to
+/// <see cref="HashSubtree"/>, or in parts through <see cref="CreateSubtreeHasher"/>, keep the
+/// result at index <c>i</c>, and pass them all to
 /// <see cref="Finalize(ReadOnlySpan{Blake3Subtree})"/>. Pieces may be hashed concurrently and
 /// completed out of order.
 ///
@@ -39,15 +40,15 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
 {
     private readonly uint[] _key;
     private readonly uint _flags;
-    private readonly int _pieceSize;
-    private readonly int _chunksPerPiece;
+    private readonly long _pieceSize;
+    private readonly long _chunksPerPiece;
     private readonly long _totalLength;
     private readonly bool _hasTotalLength;
     private readonly int _pieceCount;
     private readonly ulong _contextTag;
     private bool _disposed;
 
-    private Blake3SubtreeContext(ReadOnlySpan<uint> key, uint flags, int pieceSize,
+    private Blake3SubtreeContext(ReadOnlySpan<uint> key, uint flags, long pieceSize,
         long totalLength, bool hasTotalLength)
     {
         ValidatePieceSize(pieceSize);
@@ -101,7 +102,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// length whenever it is known.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="pieceSize"/> is not a power-of-two multiple of 1024.</exception>
-    public static Blake3SubtreeContext Create(int pieceSize)
+    public static Blake3SubtreeContext Create(long pieceSize)
         => new(Blake3Constants.IV, 0, pieceSize, 0, hasTotalLength: false);
 
     /// <summary>
@@ -118,7 +119,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="pieceSize"/> is not a power-of-two multiple of 1024.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="totalLength"/> is negative, or implies more than int.MaxValue pieces.</exception>
-    public static Blake3SubtreeContext Create(int pieceSize, long totalLength)
+    public static Blake3SubtreeContext Create(long pieceSize, long totalLength)
         => new(Blake3Constants.IV, 0, pieceSize, totalLength, hasTotalLength: true);
 
     /// <summary>
@@ -128,7 +129,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// <param name="pieceSize">Bytes per piece. Must be a power-of-two multiple of 1024.</param>
     /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
     [SkipLocalsInit]
-    public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, int pieceSize)
+    public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, long pieceSize)
     {
         Span<uint> keyWords = stackalloc uint[8];
         KeyWords(key, keyWords);
@@ -143,7 +144,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// <param name="pieceSize">Bytes per piece. Must be a power-of-two multiple of 1024.</param>
     /// <param name="totalLength">Total length of the whole input in bytes.</param>
     [SkipLocalsInit]
-    public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, int pieceSize,
+    public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, long pieceSize,
         long totalLength)
     {
         Span<uint> keyWords = stackalloc uint[8];
@@ -156,13 +157,13 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// A context for the key derivation function, for an input whose total length is not known.
     /// </summary>
     /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
-    public static Blake3SubtreeContext CreateDeriveKey(string context, int pieceSize)
+    public static Blake3SubtreeContext CreateDeriveKey(string context, long pieceSize)
         => CreateDeriveKey(Encoding.UTF8.GetBytes(context), pieceSize);
 
     /// <summary>
     /// A context for the key derivation function, for an input of known length.
     /// </summary>
-    public static Blake3SubtreeContext CreateDeriveKey(string context, int pieceSize, long totalLength)
+    public static Blake3SubtreeContext CreateDeriveKey(string context, long pieceSize, long totalLength)
         => CreateDeriveKey(Encoding.UTF8.GetBytes(context), pieceSize, totalLength);
 
     /// <summary>
@@ -170,7 +171,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// </summary>
     /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
     [SkipLocalsInit]
-    public static Blake3SubtreeContext CreateDeriveKey(ReadOnlySpan<byte> context, int pieceSize)
+    public static Blake3SubtreeContext CreateDeriveKey(ReadOnlySpan<byte> context, long pieceSize)
     {
         Span<uint> keyWords = stackalloc uint[8];
         DeriveKeyWords(context, keyWords);
@@ -182,7 +183,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// A context for the key derivation function, for an input of known length.
     /// </summary>
     [SkipLocalsInit]
-    public static Blake3SubtreeContext CreateDeriveKey(ReadOnlySpan<byte> context, int pieceSize,
+    public static Blake3SubtreeContext CreateDeriveKey(ReadOnlySpan<byte> context, long pieceSize,
         long totalLength)
     {
         Span<uint> keyWords = stackalloc uint[8];
@@ -194,7 +195,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// <summary>
     /// Bytes per piece. Every piece is this long except the last, which may be shorter.
     /// </summary>
-    public int PieceSize => _pieceSize;
+    public long PieceSize => _pieceSize;
 
     /// <summary>
     /// True when this context was given the total length, and so can report
@@ -247,12 +248,12 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// </summary>
     /// <exception cref="InvalidOperationException">The context was created without a total length.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The index is outside [0, <see cref="PieceCount"/>).</exception>
-    public int GetPieceLength(int pieceIndex)
+    public long GetPieceLength(int pieceIndex)
     {
         if (!_hasTotalLength) ThrowNoTotalLength();
         if ((uint)pieceIndex >= (uint)_pieceCount) ThrowPieceIndexOutOfRange(pieceIndex);
         long remaining = _totalLength - (long)pieceIndex * _pieceSize;
-        return remaining < _pieceSize ? (int)remaining : _pieceSize;
+        return remaining < _pieceSize ? remaining : _pieceSize;
     }
 
     /// <summary>
@@ -289,11 +290,13 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
         {
             if (pieceIndex >= _pieceCount) ThrowPieceIndexOutOfRange(pieceIndex);
 
-            int expected = GetPieceLength(pieceIndex);
+            long expected = GetPieceLength(pieceIndex);
             if (input.Length != expected)
             {
                 throw new ArgumentException(
-                    $"Piece {pieceIndex} must be exactly {expected} bytes, but {input.Length} were given.",
+                    expected > int.MaxValue
+                        ? $"Piece {pieceIndex} is {expected} bytes, which is more than one span can hold. Use CreateSubtreeHasher to feed it in parts."
+                        : $"Piece {pieceIndex} must be exactly {expected} bytes, but {input.Length} were given.",
                     nameof(input));
             }
         }
@@ -307,6 +310,45 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
         ulong chunkCounter = (ulong)pieceIndex * (ulong)_chunksPerPiece;
         Blake3Tree.SubtreeOutput(input, _key, chunkCounter, _flags, out var output);
         return new Blake3Subtree(output, _contextTag, pieceIndex, input.Length);
+    }
+
+    /// <summary>
+    /// Starts hashing one piece of the input incrementally, for callers who receive a piece in
+    /// parts -- as it arrives from the network, say -- and do not want to buffer the whole piece.
+    /// </summary>
+    /// <param name="pieceIndex">
+    /// Which piece the bytes belong to, counting from zero. As with <see cref="HashSubtree"/>,
+    /// bytes fed under the wrong index produce a wrong digest and no error.
+    /// </param>
+    /// <returns>
+    /// A hasher to feed with <see cref="Blake3SubtreeHasher.Update"/> and complete with
+    /// <see cref="Blake3SubtreeHasher.Finish"/>. It is not thread-safe; use one per piece, on
+    /// one thread at a time. Different pieces' hashers may run concurrently.
+    /// </returns>
+    /// <remarks>
+    /// This is also the only way to hash a piece longer than 2 GB, since a span cannot hold one.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="pieceIndex"/> is negative, or beyond the last piece of a known-length input.</exception>
+    /// <exception cref="ObjectDisposedException">The context has been disposed.</exception>
+    public Blake3SubtreeHasher CreateSubtreeHasher(int pieceIndex)
+    {
+        if (_disposed) ThrowDisposed();
+        if (pieceIndex < 0) ThrowPieceIndexOutOfRange(pieceIndex);
+
+        long expectedLength;
+        if (_hasTotalLength)
+        {
+            if (pieceIndex >= _pieceCount) ThrowPieceIndexOutOfRange(pieceIndex);
+            expectedLength = GetPieceLength(pieceIndex);
+        }
+        else
+        {
+            expectedLength = -1;
+        }
+
+        ulong chunkCounter = (ulong)pieceIndex * (ulong)_chunksPerPiece;
+        return new Blake3SubtreeHasher(_key, _flags, chunkCounter, _contextTag, pieceIndex,
+            _pieceSize, expectedLength);
     }
 
     /// <summary>
@@ -463,7 +505,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
                 // the total length, so two contexts over inputs of 2049 and 2050 bytes agree on
                 // piece size, key and piece count; only the final piece's length tells them apart,
                 // and without this check one input's pieces finalize happily under the other.
-                int expected = GetPieceLength(i);
+                long expected = GetPieceLength(i);
                 if (piece.Length != expected)
                 {
                     throw new ArgumentException(
@@ -491,7 +533,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// hashed by an equivalent context -- in another process, or on another machine -- still
     /// combine. It is a collision check against mistakes, not against an adversary.
     /// </remarks>
-    private static ulong ComputeContextTag(ReadOnlySpan<uint> key, uint flags, int pieceSize)
+    private static ulong ComputeContextTag(ReadOnlySpan<uint> key, uint flags, long pieceSize)
     {
         const ulong offsetBasis = 14695981039346656037;
         const ulong prime = 1099511628211;
@@ -504,13 +546,17 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
         }
 
         tag = (tag ^ flags) * prime;
-        tag = (tag ^ (uint)pieceSize) * prime;
+        tag = (tag ^ (ulong)pieceSize) * prime;
         return tag;
     }
 
-    private static void ValidatePieceSize(int pieceSize)
+    private static void ValidatePieceSize(long pieceSize)
     {
         const int chunkLen = Blake3Constants.ChunkLen;
+
+        // Sized in long so a piece may exceed what one span can hold; such a piece is hashed
+        // through CreateSubtreeHasher. The check below also rejects the 0 or negative value a
+        // wrapped cast produces.
 
         // A piece is only independently hashable if it is a canonical subtree, which means a
         // power-of-two number of chunks. The index-based API then guarantees the offset.
@@ -521,7 +567,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
                 nameof(pieceSize));
         }
 
-        int chunks = pieceSize / chunkLen;
+        long chunks = pieceSize / chunkLen;
         if ((chunks & (chunks - 1)) != 0)
         {
             throw new ArgumentException(
