@@ -161,7 +161,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// A context for the keyed hash function, for an input of known length.
     /// </summary>
     /// <param name="key">A 32 byte key. The same key is used for every piece and for the fold.</param>
-    /// <param name="pieceSize">Bytes per piece. Must be a power-of-two multiple of 1024.</param>
+    /// <param name="pieceSize">Bytes per piece. Must be a power-of-two multiple of 1024, unless <paramref name="totalLength"/> fits in a single piece.</param>
     /// <param name="totalLength">Total length of the whole input in bytes.</param>
     [SkipLocalsInit]
     public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, long pieceSize,
@@ -327,7 +327,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
                 nameof(input));
         }
 
-        ulong chunkCounter = (ulong)pieceIndex * (ulong)_chunksPerPiece;
+        ulong chunkCounter = ChunkCounter(pieceIndex);
         Blake3Tree.SubtreeOutput(input, _key, chunkCounter, _flags, out var output);
         return new Blake3Subtree(output, _contextTag, pieceIndex, input.Length);
     }
@@ -366,7 +366,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
             expectedLength = -1;
         }
 
-        ulong chunkCounter = (ulong)pieceIndex * (ulong)_chunksPerPiece;
+        ulong chunkCounter = ChunkCounter(pieceIndex);
         return new Blake3SubtreeHasher(_key, _flags, chunkCounter, _contextTag, pieceIndex,
             _pieceSize, expectedLength);
     }
@@ -568,6 +568,22 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
         tag = (tag ^ flags) * prime;
         tag = (tag ^ (ulong)pieceSize) * prime;
         return tag;
+    }
+
+    /// <summary>
+    /// First chunk of a piece. A known-length context bounds the index by the piece count, so
+    /// the product fits; without a total length a huge piece size times a large index could wrap
+    /// the 64-bit chunk counter and silently alias another piece, so that is rejected.
+    /// </summary>
+    private ulong ChunkCounter(int pieceIndex)
+    {
+        ulong chunks = (ulong)_chunksPerPiece;
+        if (pieceIndex > 0 && chunks > ulong.MaxValue / (ulong)pieceIndex)
+        {
+            ThrowPieceIndexOutOfRange(pieceIndex);
+        }
+
+        return (ulong)pieceIndex * chunks;
     }
 
     private static void ValidatePieceSize(long pieceSize)

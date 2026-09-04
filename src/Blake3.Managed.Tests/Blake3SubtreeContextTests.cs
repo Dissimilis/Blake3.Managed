@@ -316,6 +316,16 @@ public class Blake3SubtreeContextTests
     }
 
     [Fact]
+    public void RejectsAPieceIndexWhoseChunkCounterWouldWrapWithoutATotalLength()
+    {
+        // 2^62 bytes per piece is 2^52 chunks; index 2^12 would put the counter at exactly 2^64.
+        using var ctx = Blake3SubtreeContext.Create(1L << 62);
+        Assert.Throws<ArgumentOutOfRangeException>(() => ctx.HashSubtree(new byte[1], 1 << 12));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ctx.CreateSubtreeHasher(1 << 12));
+        using var ok = ctx.CreateSubtreeHasher((1 << 12) - 1);
+    }
+
+    [Fact]
     public void RejectsANegativeTotalLength()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => Blake3SubtreeContext.Create(ChunkLen, -1));
