@@ -111,7 +111,7 @@ pieces[pieceIndex] = pieceHasher.Finish();
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
-| `Blake3SubtreeContext` | Hashes fixed-size pieces of one input independently, on any threads and in any order, and folds them into the whole-input digest (32 bytes or XOF). Piece size must be a power-of-two multiple of 1024; it is a `long`, so pieces larger than 2 GB are allowed. |
+| `Blake3SubtreeContext` | Hashes fixed-size pieces of one input independently, on any threads and in any order, and folds them into the whole-input digest (32 bytes or XOF). Piece size must be a power-of-two multiple of 1024, unless the known total length fits in a single piece, in which case any size works; it is a `long`, so pieces larger than 2 GB are allowed. |
 | `Blake3SubtreeHasher` | Hashes one piece incrementally through `Update` calls and `Finish`, for pieces that arrive in parts or are too large for one span. Created by `Blake3SubtreeContext.CreateSubtreeHasher`. |
 | `Blake3Subtree` | Opaque result of hashing one piece, stored at its piece index and passed to `Finalize`. |
 

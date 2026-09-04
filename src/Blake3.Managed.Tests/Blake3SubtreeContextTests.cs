@@ -268,6 +268,53 @@ public class Blake3SubtreeContextTests
         Assert.Equal(pieceSize, ctx.PieceSize);
     }
 
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(1023, 1023)]
+    [InlineData(1025, 1025)]
+    [InlineData(3 * ChunkLen, 3 * ChunkLen)]
+    [InlineData(5 * ChunkLen + 17, 5 * ChunkLen + 17)]
+    [InlineData(5 * ChunkLen + 17, 3 * ChunkLen)]
+    [InlineData(5 * ChunkLen + 17, 0)]
+    [InlineData(1, 0)]
+    public void AcceptsAnyPieceSizeWhenTheWholeInputFitsInOnePiece(int pieceSize, int totalLength)
+    {
+        // With one piece the piece is the whole input, so alignment never comes into play. This
+        // lets a caller use pieceSize == fileLength for a file that is not worth splitting.
+        var data = Data(totalLength);
+        using var ctx = Blake3SubtreeContext.Create(pieceSize, totalLength);
+
+        Assert.Equal(pieceSize, ctx.PieceSize);
+        Assert.Equal(totalLength == 0 ? 0 : 1, ctx.PieceCount);
+
+        var pieces = HashPieces(ctx, data, pieceSize);
+        Assert.Equal(Hasher.Hash(data), ctx.Finalize(pieces));
+
+        if (totalLength > 0)
+        {
+            using var hasher = ctx.CreateSubtreeHasher(0);
+            hasher.Update(data.AsSpan(0, totalLength / 2));
+            hasher.Update(data.AsSpan(totalLength / 2));
+            Assert.Equal(Hasher.Hash(data), ctx.Finalize(new[] { hasher.Finish() }));
+        }
+    }
+
+    [Theory]
+    [InlineData(1023, 1024)]
+    [InlineData(3 * ChunkLen, 3 * ChunkLen + 1)]
+    [InlineData(3 * ChunkLen, 10 * ChunkLen)]
+    public void RejectsANonCanonicalPieceSizeWhenTheInputNeedsMoreThanOnePiece(int pieceSize, int totalLength)
+    {
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(pieceSize, totalLength));
+    }
+
+    [Fact]
+    public void RejectsANonPositivePieceSizeEvenForAnEmptyInput()
+    {
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(0, 0));
+        Assert.Throws<ArgumentException>(() => Blake3SubtreeContext.Create(-1, 0));
+    }
+
     [Fact]
     public void RejectsANegativeTotalLength()
     {

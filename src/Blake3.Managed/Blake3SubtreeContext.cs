@@ -26,7 +26,9 @@ namespace Blake3.Managed;
 /// <see cref="PieceSize"/> must be a power-of-two multiple of 1024 bytes. That restriction is
 /// what makes a piece a canonical BLAKE3 subtree, which is what allows it to be hashed on its own
 /// at all. Because the piece size is fixed here and each piece is identified by index, a caller
-/// cannot produce a misaligned piece.
+/// cannot produce a misaligned piece. The one exception: when the total length is known and is
+/// no larger than the piece size, the single piece is the whole input, and any positive piece
+/// size is accepted.
 ///
 /// A piece's value depends on where it sits in the input, not only on its bytes. Passing bytes
 /// under the wrong index is the one mistake this API cannot detect, and it yields a wrong digest
@@ -51,7 +53,11 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     private Blake3SubtreeContext(ReadOnlySpan<uint> key, uint flags, long pieceSize,
         long totalLength, bool hasTotalLength)
     {
-        ValidatePieceSize(pieceSize);
+        if (pieceSize <= 0)
+        {
+            // Also rejects the 0 or negative value a wrapped cast produces.
+            throw new ArgumentException("Piece size must be positive.", nameof(pieceSize));
+        }
 
         if (hasTotalLength)
         {
@@ -59,6 +65,15 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
             {
                 throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,
                     "Total length must be non-negative.");
+            }
+
+            // When the whole input fits in one piece, that piece starts at chunk 0 and is the
+            // entire input, so its size never has to line up with the tree. Any positive size
+            // works, which lets a caller pass pieceSize == fileLength for a file that is not
+            // worth splitting instead of switching to Hasher.
+            if (totalLength > pieceSize)
+            {
+                ValidatePieceSize(pieceSize);
             }
 
             // Ceiling division written so it cannot wrap: totalLength + pieceSize - 1 overflows
@@ -73,6 +88,10 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
             }
 
             _pieceCount = (int)pieces;
+        }
+        else
+        {
+            ValidatePieceSize(pieceSize);
         }
 
         _key = key.Slice(0, 8).ToArray();
@@ -110,14 +129,15 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// </summary>
     /// <param name="pieceSize">
     /// Bytes per piece. Must be a power-of-two multiple of 1024; 1024 * 1024 is a reasonable
-    /// default.
+    /// default. If <paramref name="totalLength"/> is no larger than this, the input is a single
+    /// piece and any positive size is accepted.
     /// </param>
     /// <param name="totalLength">
     /// Total length of the whole input in bytes. Supplying it makes the context able to report
     /// <see cref="PieceCount"/> and each piece's byte range, check every piece's length as it is
     /// hashed, and detect a missing piece at the end of the input.
     /// </param>
-    /// <exception cref="ArgumentException"><paramref name="pieceSize"/> is not a power-of-two multiple of 1024.</exception>
+    /// <exception cref="ArgumentException"><paramref name="pieceSize"/> is not positive, or is not a power-of-two multiple of 1024 while <paramref name="totalLength"/> needs more than one piece.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="totalLength"/> is negative, or implies more than int.MaxValue pieces.</exception>
     public static Blake3SubtreeContext Create(long pieceSize, long totalLength)
         => new(Blake3Constants.IV, 0, pieceSize, totalLength, hasTotalLength: true);
@@ -555,8 +575,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
         const int chunkLen = Blake3Constants.ChunkLen;
 
         // Sized in long so a piece may exceed what one span can hold; such a piece is hashed
-        // through CreateSubtreeHasher. The check below also rejects the 0 or negative value a
-        // wrapped cast produces.
+        // through CreateSubtreeHasher.
 
         // A piece is only independently hashable if it is a canonical subtree, which means a
         // power-of-two number of chunks. The index-based API then guarantees the offset.
