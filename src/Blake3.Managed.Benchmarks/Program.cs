@@ -17,7 +17,8 @@ namespace Blake3.Managed.Benchmarks;
 ///   dotnet run -c Release                    A/B: frozen baseline vs current. The decision run.
 ///   dotnet run -c Release -- --competitive   where we stand against native / xoofx / CryptoHives
 ///   dotnet run -c Release -- --api           our own API surfaces against each other
-///   dotnet run -c Release -- --all           everything
+///   dotnet run -c Release -- --xof           CryptoHives-style absorb/squeeze/reset workload
+///   dotnet run -c Release -- --all           all comparison and API suites
 ///   dotnet run -c Release -- --report        breadth for reporting (README numbers)
 ///   dotnet run -c Release -- --quick         smoke test only -- see the warning below
 ///   dotnet run -c Release -- --filter "*8192*"   any BenchmarkDotNet filter still works
@@ -37,7 +38,8 @@ namespace Blake3.Managed.Benchmarks;
 /// change, single-threaded sizes held their native ratio (8 KB: 2.21 then 2.14) while multithreaded
 /// sizes drifted (128 KB: 1.22 then 1.51). Our parallel path changes package power and boost
 /// behaviour in a way the single-threaded reference does not, so throttling is not a common factor
-/// that divides out. Hence the in-process A/B against our own frozen build.
+/// that divides out. Hence the same-session A/B against our own frozen build, with the order
+/// limitation above still applying.
 /// </summary>
 public static class Program
 {
@@ -76,10 +78,13 @@ public static class Program
 
         Summary[] summaries = flags.Contains("--all")
             ? BenchmarkRunner.Run(
-                new[] { typeof(OptimizationBenchmarks), typeof(CompetitiveBenchmarks), typeof(ApiSurfaceBenchmarks) },
+                new[] { typeof(OptimizationBenchmarks), typeof(CompetitiveBenchmarks),
+                    typeof(ApiSurfaceBenchmarks), typeof(XofBenchmarks) },
                 config, passthrough)
             : flags.Contains("--kernel")
                 ? new[] { BenchmarkRunner.Run<KernelBenchmarks>(config, passthrough) }
+                : flags.Contains("--xof")
+                ? new[] { BenchmarkRunner.Run<XofBenchmarks>(config, passthrough) }
                 : flags.Contains("--dispatch")
                 ? new[] { BenchmarkRunner.Run<DispatchBenchmarks>(config, passthrough) }
                 : flags.Contains("--competitive")
@@ -186,6 +191,7 @@ public static class Program
         arg.Equals("--competitive", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--dispatch", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--kernel", StringComparison.OrdinalIgnoreCase)
+        || arg.Equals("--xof", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--api", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--all", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--quick", StringComparison.OrdinalIgnoreCase)
@@ -278,6 +284,13 @@ public static class Program
         Console.WriteLine("Decision metric: current build vs the frozen baseline build, in this same run.");
         Console.WriteLine("Absolute nanoseconds are NOT comparable across sessions (this machine throttles ~2x).");
         VerifyBaselineIsDistinct();
+        // This algorithm-specific property is internal in recent CryptoHives releases. Avoid
+        // accidentally reporting the inherited HashAlgorithm property (all CPU capabilities).
+        var cryptoHives = typeof(CryptoHives.Foundation.Security.Cryptography.Hash.Blake3);
+        var simd = cryptoHives.GetProperty("SimdSupport", System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.DeclaredOnly)?.GetValue(null);
+        Console.WriteLine($"CryptoHives {cryptoHives.Assembly.GetName().Version} package SIMD: {simd ?? "unknown"}");
         Console.WriteLine();
     }
 

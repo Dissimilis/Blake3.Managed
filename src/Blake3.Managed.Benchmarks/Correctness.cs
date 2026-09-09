@@ -241,6 +241,7 @@ internal static class Correctness
         using (var ours = ManagedHasher.New())
         {
             ours.UpdateWithJoin(data);
+            ours.UpdateWithJoin(ReadOnlySpan<byte>.Empty);
             ours.Finalize(actual);
         }
 
@@ -319,7 +320,7 @@ internal static class Correctness
     {
         int checks = 0;
 
-        foreach (var outputLength in new[] { 0, 1, 31, 32, 33, 63, 64, 65, 131, 1024 })
+        foreach (var outputLength in new[] { 0, 1, 31, 32, 33, 63, 64, 65, 131, 511, 512, 513, 1024, 1089 })
         {
             var expected = new byte[outputLength];
             using (var native = NativeHasher.New())
@@ -341,7 +342,7 @@ internal static class Correctness
 
         // Seek: both against the reference, and against slicing one long output, which catches a
         // seek that is self-consistent but disagrees with the unsought stream.
-        var full = new byte[512];
+        var full = new byte[2048];
         using (var ours = ManagedHasher.New())
         {
             ours.Update(data);
@@ -350,7 +351,7 @@ internal static class Correctness
 
         foreach (var offset in new[] { 1, 31, 32, 63, 64, 65, 127, 128, 255 })
         {
-            const int sliceLength = 96; // crosses a 64-byte output block from every offset above
+            const int sliceLength = 1089; // unaligned prefix, two SIMD batches, and a tail
 
             var expected = new byte[sliceLength];
             using (var native = NativeHasher.New())

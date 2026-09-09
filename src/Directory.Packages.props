@@ -11,7 +11,7 @@
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.0" />
     <PackageVersion Include="Blake3" Version="3.0.2" />
     <PackageVersion Include="Blake3.Native" Version="3.0.2" />
-    <PackageVersion Include="CryptoHives.Foundation.Security.Cryptography" Version="0.6.21" />
+    <PackageVersion Include="CryptoHives.Foundation.Security.Cryptography" Version="0.6.101" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
   </ItemGroup>
 </Project>

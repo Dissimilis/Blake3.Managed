@@ -147,7 +147,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// </summary>
     /// <param name="key">A 32 byte key. The same key is used for every piece and for the fold.</param>
     /// <param name="pieceSize">Bytes per piece. Must be a power-of-two multiple of 1024.</param>
-    /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
+    /// <remarks>See <see cref="Create(long)"/> for what omitting the total length costs.</remarks>
     [SkipLocalsInit]
     public static Blake3SubtreeContext CreateKeyed(ReadOnlySpan<byte> key, long pieceSize)
     {
@@ -176,7 +176,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// <summary>
     /// A context for the key derivation function, for an input whose total length is not known.
     /// </summary>
-    /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
+    /// <remarks>See <see cref="Create(long)"/> for what omitting the total length costs.</remarks>
     public static Blake3SubtreeContext CreateDeriveKey(string context, long pieceSize)
         => CreateDeriveKey(Encoding.UTF8.GetBytes(context), pieceSize);
 
@@ -189,7 +189,7 @@ public sealed unsafe class Blake3SubtreeContext : IDisposable
     /// <summary>
     /// A context for the key derivation function, for an input whose total length is not known.
     /// </summary>
-    /// <remarks>See <see cref="Create(int)"/> for what omitting the total length costs.</remarks>
+    /// <remarks>See <see cref="Create(long)"/> for what omitting the total length costs.</remarks>
     [SkipLocalsInit]
     public static Blake3SubtreeContext CreateDeriveKey(ReadOnlySpan<byte> context, long pieceSize)
     {

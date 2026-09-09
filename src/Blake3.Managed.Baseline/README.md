@@ -10,8 +10,11 @@ earlier session is not evidence. Even a ratio against a fixed external reference
 once our path is multithreaded and the reference is not — the ratio itself drifts with the
 thermal state.
 
-The only reliable control is **old code and new code measured back to back in the same process,
-in the same session, under the same thermal conditions**. That is what this project provides.
+This project lets old and new builds coexist under distinct assembly identities.
+The BenchmarkDotNet jobs run each case in a separate process and measure before/after
+in sequential blocks; they do not interleave measurements. Compare confidence intervals,
+and investigate disputed results with alternating before/after measurements because
+thermal and ordering bias can survive a same-session comparison.
 
 The shipped NuGet package cannot serve this purpose: it and the project both produce an assembly
 with the simple name `Blake3.Managed`, and the default `AssemblyLoadContext` will not load two
@@ -22,7 +25,7 @@ distort small-input measurements.
 
 ## Snapshot provenance
 
-Refreshed to commit `d097897`, 2026-07-30. During an active optimization campaign the baseline is
+Refreshed to commit `2e9c354`, 2026-09-09. During an active optimization campaign the baseline is
 moved forward to the last commit, so each experiment is measured against the code it is trying to
 improve rather than against a distant starting point. Numbers taken before and after a refresh are
 not comparable.

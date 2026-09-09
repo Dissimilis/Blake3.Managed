@@ -480,6 +480,26 @@ internal static class Blake3Core
 
             Span<uint> state = stackalloc uint[16];
 
+            // Align a seek into the middle of a block before emitting complete SIMD batches.
+            if (byteOffset != 0 && outputLen > 0)
+            {
+                CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags | Blake3Constants.Root, state);
+                int take = Math.Min(64 - byteOffset, outputLen);
+                MemoryMarshal.AsBytes(state).Slice(byteOffset, take).CopyTo(output);
+                pos = take;
+                blockCounter++;
+            }
+
+            if (OutputManyAvx2.IsSupported && outputLen - pos >= 512)
+            {
+                int batchBytes = (outputLen - pos) & ~511;
+                OutputManyAvx2.HashOutput(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags, output.Slice(pos, batchBytes));
+                pos += batchBytes;
+                blockCounter += (ulong)(batchBytes / 64);
+            }
+
             while (pos < outputLen)
             {
                 CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
@@ -487,12 +507,10 @@ internal static class Blake3Core
 
                 Span<byte> stateBytes = MemoryMarshal.AsBytes(state);
 
-                int start = pos == 0 ? byteOffset : 0;
-                int available = 64 - start;
                 int needed = outputLen - pos;
-                int toCopy = Math.Min(available, needed);
+                int toCopy = Math.Min(64, needed);
 
-                stateBytes.Slice(start, toCopy).CopyTo(output.Slice(pos));
+                stateBytes.Slice(0, toCopy).CopyTo(output.Slice(pos));
                 pos += toCopy;
                 blockCounter++;
             }
@@ -579,7 +597,7 @@ internal static class Blake3Core
         /// Defers the CV of the final complete chunk of a SIMD batch instead of re-hashing it.
         /// </summary>
         /// <remarks>
-        /// Only called after at least three sibling CVs from the same batch have been merged, so
+        /// Only called after at least one sibling CV from the same batch has been merged, so
         /// the CV stack is never empty here. That matters: a deferred CV can only serve as the
         /// right child of a root *parent* node. Were the stack empty, the root would have to be
         /// the chunk itself, which needs its pre-final-block state and not just its CV.
@@ -710,31 +728,35 @@ internal static class Blake3Core
                     continue;
                 }
 
-                // AVX2 8-way fast path
-                if (HashManyAvx2.IsSupported && _chunkState.Len == 0 && remaining.Length >= Blake3Constants.ChunkLen * 8)
+                // AVX2 batches of 5..8 complete chunks. Inactive lanes reread valid input,
+                // so remainders need neither padding nor a narrower second kernel.
+                if (HashManyAvx2.IsSupported && _chunkState.Len == 0 && remaining.Length >= Blake3Constants.ChunkLen * 5)
                 {
                     ulong startCounter = _chunkState.ChunkCounter;
+                    int chunks = Math.Min(8, remaining.Length / Blake3Constants.ChunkLen);
 
-                    HashManyAvx2.HashMany(remaining, 8, KeySpan, startCounter, _flags, batchCvs);
+                    if (chunks == 8)
+                        HashManyAvx2.HashMany(remaining, 8, KeySpan, startCounter, _flags, batchCvs);
+                    else
+                        HashManyAvx2.HashManyPartial(remaining, chunks, KeySpan, startCounter, _flags, batchCvs);
 
-                    bool hasMore = remaining.Length > Blake3Constants.ChunkLen * 8;
-                    int cvsToAdd = hasMore ? 8 : 7;
+                    bool hasMore = remaining.Length > Blake3Constants.ChunkLen * chunks;
+                    int cvsToAdd = hasMore ? chunks : chunks - 1;
 
                     for (int i = 0; i < cvsToAdd; i++)
                     {
                         AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
                     }
 
-                    _chunkState = new ChunkState(KeySpan, startCounter + 8, _flags);
+                    _chunkState = new ChunkState(KeySpan, startCounter + (ulong)chunks, _flags);
 
                     if (!hasMore)
                     {
-                        // Input ends exactly on the batch boundary. The 8th chunk's CV is already
-                        // in batchCvs; defer it rather than re-hashing those 1024 bytes.
-                        DeferChunkCv(batchCvs.Slice(7 * 8, 8));
+                        // Preserve the final chunk for root finalization or the next update.
+                        DeferChunkCv(batchCvs.Slice((chunks - 1) * 8, 8));
                     }
 
-                    remaining = remaining.Slice(Blake3Constants.ChunkLen * 8);
+                    remaining = remaining.Slice(Blake3Constants.ChunkLen * chunks);
                     continue;
                 }
 
@@ -770,6 +792,22 @@ internal static class Blake3Core
                     continue;
                 }
 
+                if (HashTwoAvx2.IsSupported && _chunkState.Len == 0
+                    && remaining.Length >= Blake3Constants.ChunkLen * 2)
+                {
+                    ulong startCounter = _chunkState.ChunkCounter;
+                    HashTwoAvx2.HashTwo(remaining, KeySpan, startCounter, _flags, batchCvs);
+                    AddChunkCv(batchCvs.Slice(0, 8), startCounter - _chunkBase + 1);
+                    bool hasMore = remaining.Length > Blake3Constants.ChunkLen * 2;
+                    if (hasMore)
+                        AddChunkCv(batchCvs.Slice(8, 8), startCounter - _chunkBase + 2);
+                    _chunkState = new ChunkState(KeySpan, startCounter + 2, _flags);
+                    if (!hasMore)
+                        DeferChunkCv(batchCvs.Slice(8, 8));
+                    remaining = remaining.Slice(Blake3Constants.ChunkLen * 2);
+                    continue;
+                }
+
                 if (_chunkState.Len == 0 && remaining.Length > Blake3Constants.ChunkLen)
                 {
                     HashChunkCv(KeySpan, remaining.Slice(0, Blake3Constants.ChunkLen),
@@ -794,6 +832,10 @@ internal static class Blake3Core
         public unsafe void UpdateWithJoin(ReadOnlySpan<byte> input)
         {
             const int chunkLen = Blake3Constants.ChunkLen;
+
+            // An empty update must not commit the deferred final CV. HashAlgorithm calls
+            // this when TransformFinalBlock receives an empty buffer.
+            if (input.IsEmpty) return;
 
             // As in Update: new input means a deferred chunk is not the last one.
             if (_hasPendingCv) FlushPendingCv();
