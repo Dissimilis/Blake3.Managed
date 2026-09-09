@@ -22,9 +22,8 @@ public unsafe struct Hasher : IDisposable
     /// -1, the default, lets the thread pool decide; 1 hashes on the calling thread only.
     /// </summary>
     /// <remarks>
-    /// This is process-wide, and a hint rather than a guarantee: the value is passed to the
-    /// <see cref="System.Threading.Tasks.Parallel"/> fan-out, which still runs on the shared
-    /// thread pool. Setting it to 1 is the stronger statement -- that path skips the pool
+    /// This is process-wide, and a hint rather than a guarantee: it caps the number of workers
+    /// one call queues to the shared thread pool, which may still run them on fewer threads. Setting it to 1 is the stronger statement -- that path skips the pool
     /// entirely and runs the serial tree, which is what a caller who is already parallelising
     /// over many inputs wants, since nesting two fan-outs on one pool costs more than it buys.
     ///

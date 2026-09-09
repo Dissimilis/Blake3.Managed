@@ -1,4 +1,5 @@
-# Regenerates the README benchmark chart from BenchmarkDotNet results.
+# Regenerates the historical benchmark_v0610.jpg from the fixed data below.
+# For the current README charts, use src/Blake3.Managed.Benchmarks/make_chart.py.
 # Run: pwsh img/make_chart.ps1
 Add-Type -AssemblyName System.Drawing
 

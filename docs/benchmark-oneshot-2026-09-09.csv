@@ -1,0 +1,61 @@
+method,size_bytes,mean_ns,error_ns
+Blake3.Native Rust [serial],4,98.09,2.18
+Blake3 3.x xoofx managed [serial],4,101.35,1.061
+CryptoHives package [serial],4,109.17,3.296
+"ours Hash(input, output) [parallel >72KB]",4,71.08,5.791
+SHA256 [serial],4,224.44,37.279
+Blake3.Native Rust [serial],128,171.71,2.215
+Blake3 3.x xoofx managed [serial],128,161.2,4.182
+CryptoHives package [serial],128,182.26,6.023
+"ours Hash(input, output) [parallel >72KB]",128,148.19,2.903
+SHA256 [serial],128,308.04,27.068
+Blake3.Native Rust [serial],1024,1208.92,6.143
+Blake3 3.x xoofx managed [serial],1024,1322.54,11.567
+CryptoHives package [serial],1024,1350.77,36.852
+"ours Hash(input, output) [parallel >72KB]",1024,1239.52,14.19
+SHA256 [serial],1024,874.15,32.767
+Blake3.Native Rust [serial],2048,1269.15,15.092
+Blake3 3.x xoofx managed [serial],2048,2780.83,78.466
+CryptoHives package [serial],2048,2119.59,151.886
+"ours Hash(input, output) [parallel >72KB]",2048,1228.89,10.93
+SHA256 [serial],2048,1552.97,34.747
+Blake3.Native Rust [serial],4096,1740.53,15.642
+Blake3 3.x xoofx managed [serial],4096,5606.49,24.297
+CryptoHives package [serial],4096,2285.06,93.523
+"ours Hash(input, output) [parallel >72KB]",4096,2026.06,31.86
+SHA256 [serial],4096,2841.39,60.687
+Blake3.Native Rust [serial],6144,3030.47,69.657
+Blake3 3.x xoofx managed [serial],6144,8318.59,66.395
+CryptoHives package [serial],6144,2405.8,69.726
+"ours Hash(input, output) [parallel >72KB]",6144,2093.67,20.555
+SHA256 [serial],6144,4019.67,39.045
+Blake3.Native Rust [serial],8192,1839.69,6.194
+Blake3 3.x xoofx managed [serial],8192,2298.59,20.093
+CryptoHives package [serial],8192,2453.64,43.432
+"ours Hash(input, output) [parallel >72KB]",8192,2147.81,9.757
+SHA256 [serial],8192,5282.51,22.45
+Blake3.Native Rust [serial],16384,3090.16,32.194
+Blake3 3.x xoofx managed [serial],16384,3797.83,31.956
+CryptoHives package [serial],16384,4647.12,23.025
+"ours Hash(input, output) [parallel >72KB]",16384,4061.01,144.138
+SHA256 [serial],16384,10407.35,19.571
+Blake3.Native Rust [serial],65536,11885.38,43.377
+Blake3 3.x xoofx managed [serial],65536,14642.81,124.997
+CryptoHives package [serial],65536,17506.15,162.93
+"ours Hash(input, output) [parallel >72KB]",65536,15448.47,131.351
+SHA256 [serial],65536,41136.98,327.327
+Blake3.Native Rust [serial],131072,23440.73,333.265
+Blake3 3.x xoofx managed [serial],131072,29112.97,193.512
+CryptoHives package [serial],131072,38116.35,1299.721
+"ours Hash(input, output) [parallel >72KB]",131072,11115.51,548.585
+SHA256 [serial],131072,82749.48,785.497
+Blake3.Native Rust [serial],1048576,199787.08,4742.231
+Blake3 3.x xoofx managed [serial],1048576,289805.55,12926.645
+CryptoHives package [serial],1048576,309281.58,10264.64
+"ours Hash(input, output) [parallel >72KB]",1048576,44424.3,3807.466
+SHA256 [serial],1048576,663528.55,1910.909
+Blake3.Native Rust [serial],10485760,2781210.86,126017.548
+Blake3 3.x xoofx managed [serial],10485760,4146440.31,323949.107
+CryptoHives package [serial],10485760,4544661.41,752325.931
+"ours Hash(input, output) [parallel >72KB]",10485760,440770.06,20975.227
+SHA256 [serial],10485760,6822812.89,131294.415

@@ -44,7 +44,24 @@ internal static class Blake3Tree
         Span<byte> output)
     {
         Span<uint> parentBlock = stackalloc uint[16];
-        CompressSubtreeToParentBlock(input, key, 0, flags, parentBlock);
+        if (input.Length <= 2 * Blake3Constants.ChunkLen)
+        {
+            // Two chunks already are the root's two children. No frontier or parent
+            // reduction is needed, even when the final chunk is partial.
+            HashChunks(input, key, 0, flags, parentBlock);
+        }
+        else
+        {
+            CompressSubtreeToParentBlock(input, key, 0, flags, parentBlock, interleaveFullBatches: true);
+        }
+
+        if (output.Length == 32 && BitConverter.IsLittleEndian)
+        {
+            Blake3Core.CompressCv(key, parentBlock, 0, Blake3Constants.BlockLen,
+                flags | Blake3Constants.Parent | Blake3Constants.Root,
+                MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
 
         // The root is the final parent node: two CVs as its message, with ROOT applied by Output.
         var rootOutput = new Blake3Core.Output();
@@ -418,14 +435,14 @@ internal static class Blake3Tree
     /// </remarks>
     [SkipLocalsInit]
     private static void CompressSubtreeToParentBlock(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        ulong chunkCounter, uint flags, Span<uint> parentBlock)
+        ulong chunkCounter, uint flags, Span<uint> parentBlock, bool interleaveFullBatches = false)
     {
         // Two buffers ping-ponged rather than allocating per level. CompressSubtreeWide returns at
         // most 8 CVs, so this halves 8 -> 4 -> 2 and never runs more than twice.
         Span<uint> a = stackalloc uint[16 * 8];
         Span<uint> b = stackalloc uint[16 * 8];
 
-        int numCvs = CompressSubtreeWide(input, key, chunkCounter, flags, a);
+        int numCvs = CompressSubtreeWide(input, key, chunkCounter, flags, a, interleaveFullBatches);
 
         bool inA = true;
         while (numCvs > 2)
@@ -447,7 +464,7 @@ internal static class Blake3Tree
     /// <returns>Number of CVs written to <paramref name="outCvs"/>; never more than 8.</returns>
     [SkipLocalsInit]
     private static int CompressSubtreeWide(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        ulong chunkCounter, uint flags, Span<uint> outCvs)
+        ulong chunkCounter, uint flags, Span<uint> outCvs, bool interleaveFullBatches = false)
     {
         // Floor of 2: with a scalar-only kernel the leaf case would return a single CV, and a
         // parent node needs two children.
@@ -455,7 +472,7 @@ internal static class Blake3Tree
 
         if (input.Length <= Blake3Constants.ChunkLen * degree)
         {
-            return HashChunks(input, key, chunkCounter, flags, outCvs);
+            return HashChunks(input, key, chunkCounter, flags, outCvs, interleaveFullBatches);
         }
 
         // BLAKE3 splits a subtree at the largest power-of-two chunk count strictly below the total,
@@ -464,9 +481,10 @@ internal static class Blake3Tree
         ulong rightCounter = chunkCounter + (ulong)(leftLen / Blake3Constants.ChunkLen);
 
         Span<uint> children = stackalloc uint[16 * 8];
-        int leftN = CompressSubtreeWide(input.Slice(0, leftLen), key, chunkCounter, flags, children);
+        int leftN = CompressSubtreeWide(input.Slice(0, leftLen), key, chunkCounter, flags, children,
+            interleaveFullBatches);
         int rightN = CompressSubtreeWide(input.Slice(leftLen), key, rightCounter, flags,
-            children.Slice(leftN * 8));
+            children.Slice(leftN * 8), interleaveFullBatches);
 
         if (leftN == 1)
         {
@@ -484,7 +502,7 @@ internal static class Blake3Tree
     /// </summary>
     [SkipLocalsInit]
     private static int HashChunks(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
-        ulong chunkCounter, uint flags, Span<uint> cvs)
+        ulong chunkCounter, uint flags, Span<uint> cvs, bool interleaveFullBatches = false)
     {
         const int chunkLen = Blake3Constants.ChunkLen;
 
@@ -494,11 +512,25 @@ internal static class Blake3Tree
 
         while (remaining.Length >= chunkLen * 8 && HashManyAvx2.IsSupported)
         {
-            HashManyAvx2.HashMany(remaining.Slice(0, chunkLen * 8), 8, key, counter, flags,
-                cvs.Slice(n * 8, 64));
+            if (interleaveFullBatches)
+                HashManyAvx2.HashManySerial(remaining.Slice(0, chunkLen * 8), key, counter, flags,
+                    cvs.Slice(n * 8, 64));
+            else
+                HashManyAvx2.HashMany(remaining.Slice(0, chunkLen * 8), 8, key, counter, flags,
+                    cvs.Slice(n * 8, 64));
             remaining = remaining.Slice(chunkLen * 8);
             counter += 8;
             n += 8;
+        }
+
+        if (HashManyAvx2.IsSupported && remaining.Length >= chunkLen * 5)
+        {
+            int fullChunks = remaining.Length / chunkLen;
+            HashManyAvx2.HashManyPartial(remaining, fullChunks, key, counter, flags,
+                cvs.Slice(n * 8, 64));
+            remaining = remaining.Slice(fullChunks * chunkLen);
+            counter += (ulong)fullChunks;
+            n += fullChunks;
         }
 
         while (remaining.Length >= chunkLen * 4
@@ -515,6 +547,14 @@ internal static class Blake3Tree
             remaining = remaining.Slice(chunkLen * 4);
             counter += 4;
             n += 4;
+        }
+
+        if (HashTwoAvx2.IsSupported && remaining.Length >= chunkLen * 2)
+        {
+            HashTwoAvx2.HashTwo(remaining, key, counter, flags, cvs.Slice(n * 8, 16));
+            remaining = remaining.Slice(chunkLen * 2);
+            counter += 2;
+            n += 2;
         }
 
         while (remaining.Length > 0)

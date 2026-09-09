@@ -1,0 +1,13 @@
+method,size_bytes,mean_ns,error_ns
+AfterXof,128,3017.0,76.89999999999999
+NativeXof,128,2574.0,57.1
+CryptoHivesXof,128,2982.0,29.2
+AfterXof,1024,3091.0,44.1
+NativeXof,1024,3459.0,40.2
+CryptoHivesXof,1024,3503.0,29.0
+AfterXof,8192,4617.0,50.4
+NativeXof,8192,10617.0,128.20000000000002
+CryptoHivesXof,8192,5528.0,24.2
+AfterXof,131072,33730.0,83.4
+NativeXof,131072,134358.0,1148.7
+CryptoHivesXof,131072,38026.0,297.09999999999997

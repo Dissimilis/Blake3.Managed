@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<title id="title">BLAKE3 XOF latency — lower is better</title>
+<desc id="desc">Two 1 KiB absorbs, output, reset. All implementations use one thread. Both axes use logarithmic scales. Points show measured means; the accompanying table gives confidence margins.</desc>
+<rect width="1200" height="630" fill="white"/>
+<text x="80" y="28" font-size="20" font-weight="600" fill="#202020">BLAKE3 XOF latency — lower is better</text>
+<text x="80" y="49" font-size="12" fill="#555">AMD Ryzen 7 PRO 7840U (8 cores / 16 threads) · .NET 10.0.11 · 2026-09-09</text>
+<text x="80" y="67" font-size="11" fill="#555">Two 1 KiB absorbs, output, reset. All implementations use one thread.</text>
+<line x1="80" y1="542.2" x2="895" y2="542.2" stroke="#e4e7e5"/>
+<text x="70" y="546.2" text-anchor="end" font-size="11" fill="#555">2</text>
+<line x1="80" y1="448.2" x2="895" y2="448.2" stroke="#e4e7e5"/>
+<text x="70" y="452.2" text-anchor="end" font-size="11" fill="#555">5</text>
+<line x1="80" y1="377.2" x2="895" y2="377.2" stroke="#e4e7e5"/>
+<text x="70" y="381.2" text-anchor="end" font-size="11" fill="#555">10</text>
+<line x1="80" y1="306.1" x2="895" y2="306.1" stroke="#e4e7e5"/>
+<text x="70" y="310.1" text-anchor="end" font-size="11" fill="#555">20</text>
+<line x1="80" y1="212.1" x2="895" y2="212.1" stroke="#e4e7e5"/>
+<text x="70" y="216.1" text-anchor="end" font-size="11" fill="#555">50</text>
+<line x1="80" y1="141.1" x2="895" y2="141.1" stroke="#e4e7e5"/>
+<text x="70" y="145.1" text-anchor="end" font-size="11" fill="#555">100</text>
+<line x1="80.0" y1="550" x2="80.0" y2="555" stroke="#999"/>
+<text x="80.0" y="571" text-anchor="middle" font-size="10.5" fill="#555">128 B</text>
+<line x1="324.5" y1="550" x2="324.5" y2="555" stroke="#999"/>
+<text x="324.5" y="571" text-anchor="middle" font-size="10.5" fill="#555">1 KiB</text>
+<line x1="569.0" y1="550" x2="569.0" y2="555" stroke="#999"/>
+<text x="569.0" y="571" text-anchor="middle" font-size="10.5" fill="#555">8 KiB</text>
+<line x1="895.0" y1="550" x2="895.0" y2="555" stroke="#999"/>
+<text x="895.0" y="571" text-anchor="middle" font-size="10.5" fill="#555">128 KiB</text>
+<text x="20" y="315.0" transform="rotate(-90 20 315.0)" text-anchor="middle" font-size="12" fill="#444">Time per absorb / output / reset (us, log scale)</text>
+<line x1="80" y1="550" x2="895" y2="550" stroke="#999"/>
+<text x="487.5" y="602" text-anchor="middle" font-size="12" fill="#444">Output size (log scale)</text>
+<path d="M80.0,516.3 L324.5,486.0 L569.0,371.0 L895.0,110.8" fill="none" stroke="#707070" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="516.3" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 B: 2.574 ± 0.0571 us</title></circle>
+<circle cx="324.5" cy="486.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 1 KiB: 3.459 ± 0.0402 us</title></circle>
+<circle cx="569.0" cy="371.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 8 KiB: 10.62 ± 0.128 us</title></circle>
+<circle cx="895.0" cy="110.8" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 KiB: 134.4 ± 1.15 us</title></circle>
+<line x1="920" y1="92" x2="944" y2="92" stroke="#707070" stroke-width="2"/>
+<text x="954" y="96" font-size="12" fill="#333">Blake3.Native 3.0.2</text>
+<path d="M80.0,501.2 L324.5,484.7 L569.0,437.9 L895.0,240.2" fill="none" stroke="#8055ad" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="501.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 B: 2.982 ± 0.0292 us</title></circle>
+<circle cx="324.5" cy="484.7" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 1 KiB: 3.503 ± 0.029 us</title></circle>
+<circle cx="569.0" cy="437.9" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 8 KiB: 5.528 ± 0.0242 us</title></circle>
+<circle cx="895.0" cy="240.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 KiB: 38.03 ± 0.297 us</title></circle>
+<line x1="920" y1="122" x2="944" y2="122" stroke="#8055ad" stroke-width="2"/>
+<text x="954" y="126" font-size="12" fill="#333">CryptoHives 0.6.101</text>
+<path d="M80.0,500.0 L324.5,497.5 L569.0,456.4 L895.0,252.5" fill="none" stroke="#24783c" stroke-width="3" stroke-linejoin="round"/>
+<circle cx="80.0" cy="500.0" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 B: 3.017 ± 0.0769 us</title></circle>
+<circle cx="324.5" cy="497.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 1 KiB: 3.091 ± 0.0441 us</title></circle>
+<circle cx="569.0" cy="456.4" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 8 KiB: 4.617 ± 0.0504 us</title></circle>
+<circle cx="895.0" cy="252.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 KiB: 33.73 ± 0.0834 us</title></circle>
+<line x1="920" y1="152" x2="944" y2="152" stroke="#24783c" stroke-width="3"/>
+<text x="954" y="156" font-size="12" fill="#333">Blake3.Managed (this library)</text>
+<text x="920" y="211" font-size="11" fill="#666">All implementations: one thread.</text>
+<text x="920" y="229" font-size="11" fill="#666">Same 1 KiB input absorbed twice.</text>
+<text x="920" y="247" font-size="11" fill="#666"></text>
+<text x="920" y="265" font-size="11" fill="#666">Means shown; see table for margins.</text>
+<text x="920" y="283" font-size="11" fill="#666">Lines connect measured sizes.</text>
+<text x="920" y="301" font-size="11" fill="#666">Compare within this run only.</text>
+</svg>

@@ -507,6 +507,13 @@ internal static class Blake3Core
         private ChunkState _chunkState;
         private readonly uint _flags;
 
+        // Index of the first chunk this state hashes. Zero for a whole input. For one piece of a
+        // larger input it is the piece's first chunk, which every chunk counter is offset by,
+        // while the merge bookkeeping in AddChunkCv counts chunks from the piece start: the
+        // merge rule pairs subtrees by the parity of the relative count, and using the absolute
+        // count would try to merge past the top of the stack at the end of an aligned piece.
+        private readonly ulong _chunkBase;
+
         // Set when a complete chunk's CV from a SIMD batch has not yet been merged into the
         // stack, because it may turn out to be the final chunk.
         //
@@ -523,14 +530,28 @@ internal static class Blake3Core
         private bool _hasPendingCv;
 
         public HasherState(ReadOnlySpan<uint> key, uint flags)
+            : this(key, flags, 0)
+        {
+        }
+
+        /// <summary>
+        /// A state whose first chunk is chunk <paramref name="startChunk"/> of a larger input.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Finalize"/> then describes the top node of the subtree covering the bytes
+        /// fed in, which is canonical when those bytes form a power-of-two number of chunks
+        /// starting at a multiple of that count, or the short tail of the input.
+        /// </remarks>
+        public HasherState(ReadOnlySpan<uint> key, uint flags, ulong startChunk)
         {
             // The CV stack needs no clearing: slots are always written by PushCv before
             // PopCv/Finalize read them (Reset() already relies on this).
             _cvStackLen = 0;
             _flags = flags;
             _hasPendingCv = false;
+            _chunkBase = startChunk;
             key[..8].CopyTo(KeySpan);
-            _chunkState = new ChunkState(key, 0, flags);
+            _chunkState = new ChunkState(key, startChunk, flags);
         }
 
         // The slot one past the top of the stack: unused until the next PushCv, which cannot
@@ -551,7 +572,7 @@ internal static class Blake3Core
             if (!_hasPendingCv) return;
 
             _hasPendingCv = false;
-            AddChunkCv(PendingCvSpan, _chunkState.ChunkCounter);
+            AddChunkCv(PendingCvSpan, _chunkState.ChunkCounter - _chunkBase);
         }
 
         /// <summary>
@@ -658,10 +679,10 @@ internal static class Blake3Core
                     var output = _chunkState.CreateOutput();
                     output.ChainingValue(chunkCv);
 
-                    ulong totalChunks = _chunkState.ChunkCounter + 1;
-                    AddChunkCv(chunkCv, totalChunks);
+                    ulong nextChunk = _chunkState.ChunkCounter + 1;
+                    AddChunkCv(chunkCv, nextChunk - _chunkBase);
 
-                    _chunkState = new ChunkState(KeySpan, totalChunks, _flags);
+                    _chunkState = new ChunkState(KeySpan, nextChunk, _flags);
                 }
 
                 // AVX2 64-chunk subtree fast path: hash 64 chunks 8-way, then reduce
@@ -682,7 +703,7 @@ internal static class Blake3Core
                     }
 
                     ReduceCvs(batchCvs, subtreeChunks, KeySpan, _flags);
-                    AddChunkCv(batchCvs.Slice(0, 8), (startCounter >> 6) + 1);
+                    AddChunkCv(batchCvs.Slice(0, 8), ((startCounter - _chunkBase) >> 6) + 1);
 
                     _chunkState = new ChunkState(KeySpan, startCounter + subtreeChunks, _flags);
                     remaining = remaining.Slice(subtreeChunks * Blake3Constants.ChunkLen);
@@ -701,8 +722,7 @@ internal static class Blake3Core
 
                     for (int i = 0; i < cvsToAdd; i++)
                     {
-                        ulong totalChunks = startCounter + (ulong)i + 1;
-                        AddChunkCv(batchCvs.Slice(i * 8, 8), totalChunks);
+                        AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
                     }
 
                     _chunkState = new ChunkState(KeySpan, startCounter + 8, _flags);
@@ -734,8 +754,7 @@ internal static class Blake3Core
 
                     for (int i = 0; i < cvsToAdd; i++)
                     {
-                        ulong totalChunks = startCounter + (ulong)i + 1;
-                        AddChunkCv(batchCvs.Slice(i * 8, 8), totalChunks);
+                        AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
                     }
 
                     _chunkState = new ChunkState(KeySpan, startCounter + 4, _flags);
@@ -756,9 +775,9 @@ internal static class Blake3Core
                     HashChunkCv(KeySpan, remaining.Slice(0, Blake3Constants.ChunkLen),
                         _chunkState.ChunkCounter, _flags, chunkCv);
 
-                    ulong totalChunks = _chunkState.ChunkCounter + 1;
-                    AddChunkCv(chunkCv, totalChunks);
-                    _chunkState = new ChunkState(KeySpan, totalChunks, _flags);
+                    ulong nextChunk = _chunkState.ChunkCounter + 1;
+                    AddChunkCv(chunkCv, nextChunk - _chunkBase);
+                    _chunkState = new ChunkState(KeySpan, nextChunk, _flags);
                     remaining = remaining.Slice(Blake3Constants.ChunkLen);
                     continue;
                 }
@@ -863,15 +882,15 @@ internal static class Blake3Core
                 for (int i = 0; i < subtrees; i++)
                 {
                     cvBuffer.AsSpan(i * 8, 8).CopyTo(tempCv);
-                    AddChunkCv(tempCv, (startCounter >> 6) + (ulong)i + 1);
+                    AddChunkCv(tempCv, ((startCounter - _chunkBase) >> 6) + (ulong)i + 1);
                 }
 
                 // Merge tail batch chunk CVs (units of 1 chunk).
-                ulong chunkBase = startCounter + (ulong)(subtrees * subtreeChunks);
+                ulong tailStart = startCounter - _chunkBase + (ulong)(subtrees * subtreeChunks);
                 for (int j = 0; j < tailBatches * 8; j++)
                 {
                     cvBuffer.AsSpan(subtrees * 8 + j * 8, 8).CopyTo(tempCv);
-                    AddChunkCv(tempCv, chunkBase + (ulong)j + 1);
+                    AddChunkCv(tempCv, tailStart + (ulong)j + 1);
                 }
             }
             finally
@@ -954,7 +973,7 @@ internal static class Blake3Core
         {
             _cvStackLen = 0;
             _hasPendingCv = false;
-            _chunkState = new ChunkState(KeySpan, 0, _flags);
+            _chunkState = new ChunkState(KeySpan, _chunkBase, _flags);
         }
     }
 }

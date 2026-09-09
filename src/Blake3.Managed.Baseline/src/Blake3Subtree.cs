@@ -4,7 +4,8 @@ namespace Blake3.Managed;
 
 /// <summary>
 /// One hashed piece of a larger input, produced by
-/// <see cref="Blake3SubtreeContext.HashSubtree"/> and folded into a digest by
+/// <see cref="Blake3SubtreeContext.HashSubtree"/> or <see cref="Blake3SubtreeHasher.Finish"/>
+/// and folded into a digest by
 /// <see cref="Blake3SubtreeContext.Finalize(ReadOnlySpan{Blake3Subtree})"/>.
 /// </summary>
 /// <remarks>
@@ -20,10 +21,10 @@ public unsafe readonly struct Blake3Subtree
     private readonly Blake3Core.Output _output;
     private readonly ulong _contextTag;
     private readonly int _pieceIndex;
-    private readonly int _length;
+    private readonly long _length;
     private readonly bool _initialized;
 
-    internal Blake3Subtree(in Blake3Core.Output output, ulong contextTag, int pieceIndex, int length)
+    internal Blake3Subtree(in Blake3Core.Output output, ulong contextTag, int pieceIndex, long length)
     {
         _output = output;
         _contextTag = contextTag;
@@ -41,7 +42,7 @@ public unsafe readonly struct Blake3Subtree
     /// <summary>
     /// Length in bytes of the piece that was hashed.
     /// </summary>
-    public int Length => _length;
+    public long Length => _length;
 
     /// <summary>
     /// False for a <c>default</c> instance, which never came from <c>HashSubtree</c>.

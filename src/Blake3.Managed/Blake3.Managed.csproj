@@ -13,7 +13,7 @@
     <!-- NuGet package metadata -->
     <PackageId>Blake3.Managed</PackageId>
     <Title>BLAKE3 for .NET (pure C#)</Title>
-    <Description>BLAKE3 cryptographic hash function for .NET in pure managed C# — no native libraries, no P/Invoke. SIMD accelerated (AVX2, SSE/SSSE3, ARM NEON) with multithreaded hashing of large inputs; faster than SHA-256 and MD5. Supports keyed hashing (MAC), key derivation (KDF) and extendable output (XOF), plus a HashAlgorithm adapter and a hashing Stream wrapper. A fully managed, AOT-friendly alternative to native BLAKE3 wrappers — ideal for checksums, content addressing, deduplication and file integrity. Runs everywhere .NET runs, with automatic scalar fallback.</Description>
+    <Description>BLAKE3 cryptographic hash function for .NET in pure managed C# — no native libraries, no P/Invoke. SIMD accelerated (AVX2, SSE/SSSE3, ARM NEON) with multithreaded hashing of large inputs. Supports keyed hashing (MAC), key derivation (KDF) and extendable output (XOF), plus a HashAlgorithm adapter and a hashing Stream wrapper. A fully managed, AOT-friendly alternative to native BLAKE3 wrappers — ideal for checksums, content addressing, deduplication and file integrity. Runs everywhere .NET runs, with automatic scalar fallback.</Description>
     <Authors>Marius Vitkevičius</Authors>
     <Copyright>Copyright (c) 2026 Marius Vitkevičius</Copyright>
     <PackageTags>blake3;blake;hash;hashing;hash-function;cryptography;crypto;security;checksum;integrity;digest;sha256;simd;avx2;sse;neon;intrinsics;managed;kdf;mac;xof;merkle-tree;aot;csharp;dotnet</PackageTags>

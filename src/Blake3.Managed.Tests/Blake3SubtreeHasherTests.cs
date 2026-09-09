@@ -40,7 +40,7 @@ public class Blake3SubtreeHasherTests
         {
             foreach (int length in new[] { 1, 63, 64, 65, ChunkLen - 1, ChunkLen, ChunkLen + 1,
                          pieceSize - 1, pieceSize, pieceSize + 1, 3 * pieceSize, 3 * pieceSize + 500,
-                         5 * pieceSize + 1, 200 * ChunkLen + 17 })
+                         5 * pieceSize + 1, 200 * ChunkLen + 17 }.Distinct())
             {
                 yield return new object[] { pieceSize, length };
             }

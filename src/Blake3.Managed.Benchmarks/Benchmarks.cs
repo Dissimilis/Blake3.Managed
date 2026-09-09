@@ -55,7 +55,7 @@ public class OptimizationBenchmarks
     // Includes 1 MB and 10 MB: subtree scheduling and parent-reduction changes land in the
     // multithreaded band, so leaving the decision run at 128 KB would give the largest planned
     // changes no before/after coverage at all.
-    [Params(4, 128, 1_024, 1_025, 4_095, 4_096, 4_097, 8_192, 16_384, 65_536, 73_729, 131_072, 1_048_576, 10_485_760)]
+    [Params(4, 128, 1_024, 1_025, 2_048, 4_095, 4_096, 4_097, 6_144, 8_192, 16_384, 65_536, 73_729, 131_072, 1_048_576, 10_485_760)]
     public int Data_Size;
 
     [GlobalSetup]
@@ -75,6 +75,23 @@ public class OptimizationBenchmarks
 
     [Benchmark(Description = "after:  Hash() [auto-parallel]")]
     public byte AfterOneShot() => ManagedHasher.Hash(_data).AsSpan()[0];
+
+    // CryptoHives' comparison adapter uses the caller-provided destination overload.
+    [Benchmark(Description = "before: Hash(input, output)")]
+    public byte BeforeSpan()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        BaselineHasher.Hash(_data, hash);
+        return hash[0];
+    }
+
+    [Benchmark(Description = "after: Hash(input, output)")]
+    public byte AfterSpan()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        ManagedHasher.Hash(_data, hash);
+        return hash[0];
+    }
 
     // Forced-serial pair. Hash() farms subtrees to the thread pool above ~72 KB, which makes the
     // one-shot rows above a wall-clock comparison rather than a kernel comparison. These two
@@ -112,8 +129,9 @@ public class OptimizationBenchmarks
 public class CompetitiveBenchmarks
 {
     private byte[] _data = null!;
+    private CryptoHivesBlake3 _cryptoHives = null!;
 
-    [Params(4, 128, 1_024, 4_096, 8_192, 16_384, 65_536, 131_072, 1_048_576, 10_485_760)]
+    [Params(4, 128, 1_024, 2_048, 4_096, 6_144, 8_192, 16_384, 65_536, 131_072, 1_048_576, 10_485_760)]
     public int Data_Size;
 
     [GlobalSetup]
@@ -121,28 +139,48 @@ public class CompetitiveBenchmarks
     {
         _data = new byte[Data_Size];
         new Random(2).NextBytes(_data);
+        _cryptoHives = new CryptoHivesBlake3();
     }
 
+    [GlobalCleanup]
+    public void Cleanup() => _cryptoHives.Dispose();
+
     [Benchmark(Baseline = true, Description = "Blake3.Native Rust [serial]")]
-    public byte Native() => NativeHasher.Hash(_data).AsSpan()[0];
+    public byte Native()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        NativeHasher.Hash(_data, hash);
+        return hash[0];
+    }
 
     [Benchmark(Description = "Blake3 3.x xoofx managed [serial]")]
-    public byte Xoofx() => XoofxHasher.Hash(_data).AsSpan()[0];
+    public byte Xoofx()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        XoofxHasher.Hash(_data, hash);
+        return hash[0];
+    }
 
-    // Runs their SSSE3 kernel on Zen 4: their detection reports Ssse3 despite AVX2/AVX-512 being
-    // available, and their constructor intersects the requested set with the detected one, so the
-    // fast path cannot be forced from outside the assembly. This is CryptoHives-at-SSSE3, not
-    // CryptoHives-at-best; do not quote a win over this column without that caveat.
-    [Benchmark(Description = "CryptoHives SSSE3 here [serial]")]
+    // The package's available SIMD tiers are printed in the session provenance. Benchmark-only
+    // variants in CryptoHives' source repository can differ from the published package.
+    [Benchmark(Description = "CryptoHives package [serial]")]
     public byte CryptoHives()
     {
         Span<byte> hash = stackalloc byte[32];
-        CryptoHivesBlake3.TryHashData(_data, hash, out _);
+        _cryptoHives.TryHashOneShot(_data, hash, out _);
         return hash[0];
     }
 
     [Benchmark(Description = "ours Hash() [parallel >72KB]")]
     public byte OursOneShot() => ManagedHasher.Hash(_data).AsSpan()[0];
+
+    [Benchmark(Description = "ours Hash(input, output) [parallel >72KB]")]
+    public byte OursSpan()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        ManagedHasher.Hash(_data, hash);
+        return hash[0];
+    }
 
     [Benchmark(Description = "ours Update() [serial]")]
     public byte OursSerial()
@@ -339,10 +377,9 @@ public class KernelBenchmarks
 }
 
 /// <summary>
-/// Our own API surfaces against each other. Worth tracking separately because the adapters do not
-/// reach the parallel path today, so <see cref="Blake3HashAlgorithm"/> on a large input is several
-/// times slower than <c>Hasher.Hash</c> on the same bytes — and the adapters are what most
-/// applications actually consume.
+/// Our own API surfaces against each other. The adapters use UpdateWithJoin, whose alignment
+/// requirements and incremental tree differ from the all-at-once tree used by Hasher.Hash.
+/// Track them separately because applications often consume these adapter APIs.
 /// </summary>
 public class ApiSurfaceBenchmarks
 {
@@ -403,5 +440,83 @@ public class ApiSurfaceBenchmarks
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(_data, hash);
         return hash[0];
+    }
+}
+
+/// <summary>
+/// Matches CryptoHives' AbsorbSqueeze workload: absorb the same 1 KB block twice,
+/// produce Data_Size output bytes, then reset the reused hasher.
+/// </summary>
+public class XofBenchmarks
+{
+    private byte[] _input = null!;
+    private byte[] _output = null!;
+    private ManagedHasher _after;
+    private BaselineHasher _before;
+    private NativeHasher _native;
+    private CryptoHivesBlake3 _cryptoHives = null!;
+
+    [Params(128, 1_024, 8_192, 131_072)]
+    public int Data_Size;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _input = new byte[1024];
+        new Random(2).NextBytes(_input);
+        _output = new byte[Data_Size];
+        _before = BaselineHasher.New();
+        _after = ManagedHasher.New();
+        _native = NativeHasher.New();
+        _cryptoHives = new CryptoHivesBlake3();
+    }
+
+    [GlobalCleanup]
+    public void Cleanup()
+    {
+        _before.Dispose();
+        _after.Dispose();
+        _native.Dispose();
+        _cryptoHives.Dispose();
+    }
+
+    [Benchmark(Baseline = true)]
+    public byte BeforeXof()
+    {
+        _before.Update(_input);
+        _before.Update(_input);
+        _before.Finalize(_output);
+        _before.Reset();
+        return _output[0];
+    }
+
+    [Benchmark]
+    public byte AfterXof()
+    {
+        _after.Update(_input);
+        _after.Update(_input);
+        _after.Finalize(_output);
+        _after.Reset();
+        return _output[0];
+    }
+
+    [Benchmark]
+    public byte NativeXof()
+    {
+        _native.Update(_input);
+        _native.Update(_input);
+        _native.Finalize(_output);
+        _native.Reset();
+        return _output[0];
+    }
+
+    [Benchmark]
+    public byte CryptoHivesXof()
+    {
+        _cryptoHives.Absorb(_input);
+        _cryptoHives.Absorb(_input);
+        _cryptoHives.Squeeze(_output);
+        _cryptoHives.Reset();
+        return _output[0];
     }
 }
