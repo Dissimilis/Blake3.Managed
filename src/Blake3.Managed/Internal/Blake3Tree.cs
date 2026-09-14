@@ -533,6 +533,17 @@ internal static class Blake3Tree
             n += fullChunks;
         }
 
+        // Three or four whole chunks: two interleaved latency-bound chains, ahead of the
+        // 128-bit four-way kernel, which is throughput-equivalent but leaves the pipeline idle.
+        if (HashFourAvx2.IsSupported && remaining.Length >= chunkLen * 3)
+        {
+            int fullChunks = Math.Min(4, remaining.Length / chunkLen);
+            HashFourAvx2.HashFour(remaining, fullChunks, key, counter, flags, cvs.Slice(n * 8, fullChunks * 8));
+            remaining = remaining.Slice(fullChunks * chunkLen);
+            counter += (ulong)fullChunks;
+            n += fullChunks;
+        }
+
         while (remaining.Length >= chunkLen * 4
                && (HashManyNeon.IsSupported || HashManySse41.IsSupported))
         {
