@@ -126,6 +126,28 @@ public unsafe struct Hasher : IDisposable
     [SkipLocalsInit]
     public static void Hash(ReadOnlySpan<byte> input, Span<byte> output)
     {
+        // The caller-provided 256-bit destination is also the common one-shot adapter path.
+        // Use the same fused compressors as the value-returning overload, without producing
+        // a full 64-byte XOF block and copying its first half back out of scratch memory.
+        if (output.Length == Blake3.Managed.Hash.Size && input.Length <= Blake3Constants.ChunkLen)
+        {
+            if (CompressSse41.IsSupported)
+            {
+                var words = MemoryMarshal.Cast<byte, uint>(output);
+                if (input.Length <= Blake3Constants.BlockLen)
+                    CompressSse41.CompressRootIvSingleBlock(input, words);
+                else if (input.Length <= 2 * Blake3Constants.BlockLen)
+                    CompressSse41.CompressRootIvTwoBlocks(input, words);
+                else
+                    CompressSse41.HashChunkRoot32Iv(input, words);
+            }
+            else
+            {
+                Blake3Core.HashOneChunkRoot32(Blake3Constants.IV, 0, 0, output, input);
+            }
+            return;
+        }
+
         int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
 
         // Dispatch on input length first. Splitting on output length at the top left a hole:

@@ -44,5 +44,8 @@ source.tar.gz
 .claude/
 .serena/
 
+# Local SSH credentials and pinned host keys (never commit)
+/keys/
+
 # Local scratch notes
 *.local.md

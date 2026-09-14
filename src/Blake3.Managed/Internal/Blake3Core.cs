@@ -304,6 +304,15 @@ internal static class Blake3Core
                 {
                     HashParentsInPlace(cvs, p, key, parentFlags);
                 }
+
+                // A tail of 3..7 parents through the 8-way kernel, ignoring the spare lanes, as
+                // the one-shot tree does. The kernel loads all its input before storing, and the
+                // spare lanes read and write only words beyond the live CVs of this level.
+                if (numParents - p >= 3 && cvs.Length >= p * 16 + 128)
+                {
+                    HashParentsInPlace(cvs, p, key, parentFlags);
+                    p = numParents;
+                }
             }
             for (; p < numParents; p++)
             {
@@ -671,6 +680,43 @@ internal static class Blake3Core
             PushCv(rightCv);
         }
 
+        /// <summary>
+        /// Hashes the largest aligned power-of-two subtree of 8..64 chunks at the start of
+        /// <paramref name="remaining"/> that leaves at least one byte after it, pushes its single
+        /// CV, and returns the bytes consumed. The chunk counter must be a multiple of 8 and
+        /// <paramref name="remaining"/> longer than 8 chunks. Merging chunk CVs one at a time
+        /// costs seven scalar parent compressions per eight chunks; this batches them 8-way.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private int HashAlignedSubtree(ReadOnlySpan<byte> remaining, Span<uint> batchCvs)
+        {
+            const int subtreeChunks = 64;
+            ulong startCounter = _chunkState.ChunkCounter;
+            int treeChunks = 8;
+            while (treeChunks < subtreeChunks
+                   && (startCounter & (ulong)(2 * treeChunks - 1)) == 0
+                   && remaining.Length > 2 * treeChunks * Blake3Constants.ChunkLen)
+            {
+                treeChunks *= 2;
+            }
+
+            // Single-threaded here, so the interleaved schedule that won in the serial
+            // one-shot tree applies; the parallel workers keep the original kernel.
+            for (int b = 0; b < treeChunks / 8; b++)
+            {
+                HashManyAvx2.HashManySerial(
+                    remaining.Slice(b * 8 * Blake3Constants.ChunkLen, 8 * Blake3Constants.ChunkLen),
+                    KeySpan, startCounter + (ulong)(b * 8), _flags,
+                    batchCvs.Slice(b * 64, 64));
+            }
+
+            ReduceCvs(batchCvs, treeChunks, KeySpan, _flags);
+            AddChunkCv(batchCvs.Slice(0, 8), (startCounter - _chunkBase) / (ulong)treeChunks + 1);
+
+            _chunkState = new ChunkState(KeySpan, startCounter + (ulong)treeChunks, _flags);
+            return treeChunks * Blake3Constants.ChunkLen;
+        }
+
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void Update(ReadOnlySpan<byte> input)
@@ -703,28 +749,15 @@ internal static class Blake3Core
                     _chunkState = new ChunkState(KeySpan, nextChunk, _flags);
                 }
 
-                // AVX2 64-chunk subtree fast path: hash 64 chunks 8-way, then reduce
-                // their CVs with 8-way parent hashing, pushing a single subtree CV.
-                // Requires a 64-aligned chunk counter so the subtree is canonical.
+                // AVX2 aligned-subtree fast path: 8, 16, 32 or 64 chunks reduced to one CV with
+                // 8-way parent hashing. Kept out of line so this loop's register allocation
+                // does not change for the paths below.
                 if (HashManyAvx2.IsSupported && _chunkState.Len == 0
-                    && (_chunkState.ChunkCounter & (subtreeChunks - 1)) == 0
-                    && remaining.Length > subtreeChunks * Blake3Constants.ChunkLen)
+                    && (_chunkState.ChunkCounter & 7) == 0
+                    && remaining.Length > 8 * Blake3Constants.ChunkLen)
                 {
-                    ulong startCounter = _chunkState.ChunkCounter;
-
-                    for (int b = 0; b < subtreeChunks / 8; b++)
-                    {
-                        HashManyAvx2.HashMany(
-                            remaining.Slice(b * 8 * Blake3Constants.ChunkLen, 8 * Blake3Constants.ChunkLen),
-                            8, KeySpan, startCounter + (ulong)(b * 8), _flags,
-                            batchCvs.Slice(b * 64, 64));
-                    }
-
-                    ReduceCvs(batchCvs, subtreeChunks, KeySpan, _flags);
-                    AddChunkCv(batchCvs.Slice(0, 8), ((startCounter - _chunkBase) >> 6) + 1);
-
-                    _chunkState = new ChunkState(KeySpan, startCounter + subtreeChunks, _flags);
-                    remaining = remaining.Slice(subtreeChunks * Blake3Constants.ChunkLen);
+                    int consumed = HashAlignedSubtree(remaining, batchCvs);
+                    remaining = remaining.Slice(consumed);
                     continue;
                 }
 
@@ -735,6 +768,8 @@ internal static class Blake3Core
                     ulong startCounter = _chunkState.ChunkCounter;
                     int chunks = Math.Min(8, remaining.Length / Blake3Constants.ChunkLen);
 
+                    // The interleaved serial kernel measured 6.6% slower than this one for a lone
+                    // eight-chunk batch (8 KB Update).
                     if (chunks == 8)
                         HashManyAvx2.HashMany(remaining, 8, KeySpan, startCounter, _flags, batchCvs);
                     else
@@ -761,6 +796,34 @@ internal static class Blake3Core
                 }
 
                 // 4-way fast path (NEON or SSE)
+                // Three or four whole chunks as two interleaved two-chunk chains, ahead of the
+                // 128-bit four-way kernel; see HashFourAvx2.
+                if (HashFourAvx2.IsSupported && _chunkState.Len == 0
+                    && remaining.Length >= Blake3Constants.ChunkLen * 3)
+                {
+                    ulong startCounter = _chunkState.ChunkCounter;
+                    int chunks = Math.Min(4, remaining.Length / Blake3Constants.ChunkLen);
+                    HashFourAvx2.HashFour(remaining, chunks, KeySpan, startCounter, _flags, batchCvs);
+
+                    bool hasMore = remaining.Length > Blake3Constants.ChunkLen * chunks;
+                    int cvsToAdd = hasMore ? chunks : chunks - 1;
+
+                    for (int i = 0; i < cvsToAdd; i++)
+                    {
+                        AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
+                    }
+
+                    _chunkState = new ChunkState(KeySpan, startCounter + (ulong)chunks, _flags);
+
+                    if (!hasMore)
+                    {
+                        DeferChunkCv(batchCvs.Slice((chunks - 1) * 8, 8));
+                    }
+
+                    remaining = remaining.Slice(Blake3Constants.ChunkLen * chunks);
+                    continue;
+                }
+
                 if ((HashManyNeon.IsSupported || HashManySse41.IsSupported)
                     && _chunkState.Len == 0 && remaining.Length >= Blake3Constants.ChunkLen * 4)
                 {

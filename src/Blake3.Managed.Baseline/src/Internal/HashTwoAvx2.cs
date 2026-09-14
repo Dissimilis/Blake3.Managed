@@ -65,10 +65,8 @@ internal static class HashTwoAvx2
     }
 
 
-    // NoInlining: with profile data Tier1 otherwise inlines this whole kernel into the tree's
-    // entry method, which measured four to five times slower for two-chunk inputs.
     [SkipLocalsInit]
-    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void HashTwo(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
         ulong counter, uint flags, Span<uint> cvs)
     {
