@@ -132,7 +132,6 @@ pieces[pieceIndex] = pieceHasher.Finish();
 ### Benchmark environment
 
 Measured on **2026-09-09**, with the optimizations included in `v1.5.2`.
-See the [performance report](docs/performance-2026-09-09.md) for the individual experiments.
 
 ```text
 BenchmarkDotNet 0.15.8, Windows 11 (10.0.26200.9168)
@@ -177,8 +176,7 @@ counts. KiB and MiB denote powers of 1,024; the chart's GB/s is decimal.
 ![One-shot hash throughput with the parallel range shaded](img/benchmark.svg)
 
 In this run, the 2 KiB and 6 KiB rows beat all three BLAKE3 competitors. Native
-remains faster at several other single-threaded sizes. See the
-[one-shot measurements](docs/benchmark-oneshot-2026-09-09.csv) for the chart data.
+remains faster at several other single-threaded sizes.
 
 ### Extended output (XOF)
 
@@ -196,8 +194,7 @@ thread. The chart measures the complete operation: absorption, output and reset.
 ![BLAKE3 absorb, output and reset latency](img/benchmark-xof.svg)
 
 The batched output path leads this comparison at 1 KiB, 8 KiB and 128 KiB of
-output; native leads at 128 bytes. The
-[XOF measurements](docs/benchmark-xof-2026-09-09.csv) are from a separate matched
+output; native leads at 128 bytes. The XOF numbers are from a separate matched
 run on the same machine.
 
 ### Reproducing the results
@@ -209,9 +206,9 @@ dotnet run --project src/Blake3.Managed.Benchmarks -c Release -- --competitive -
 # XOF table: 3 implementations, 4 output sizes
 dotnet run --project src/Blake3.Managed.Benchmarks -c Release -- --xof --report --filter '*AfterXof*' '*NativeXof*' '*CryptoHivesXof*'
 
-# Regenerate the published charts from their saved measurements (Python, no dependencies)
-python src/Blake3.Managed.Benchmarks/make_chart.py docs/benchmark-oneshot-2026-09-09.csv img/benchmark.svg --context "AMD Ryzen 7 PRO 7840U (8 cores / 16 threads) · .NET 10.0.11 · 2026-09-09"
-python src/Blake3.Managed.Benchmarks/make_chart.py docs/benchmark-xof-2026-09-09.csv img/benchmark-xof.svg --xof --context "AMD Ryzen 7 PRO 7840U (8 cores / 16 threads) · .NET 10.0.11 · 2026-09-09"
+# Regenerate the charts from a BenchmarkDotNet CSV export (Python, no dependencies)
+python src/Blake3.Managed.Benchmarks/make_chart.py <oneshot-report.csv> img/benchmark.svg --context "<CPU> · <.NET version> · <date>"
+python src/Blake3.Managed.Benchmarks/make_chart.py <xof-report.csv> img/benchmark-xof.svg --xof --context "<CPU> · <.NET version> · <date>"
 ```
 
 The generator also accepts a BenchmarkDotNet console log. Use `--table table.md`
