@@ -16,9 +16,9 @@ namespace Blake3.Managed.Benchmarks;
 /// </summary>
 /// <remarks>
 /// Sizes sit deliberately on and beside the boundaries the scheduler branches on, so a batching
-/// regression spikes at one size instead of averaging away. Note 73_729, not 73_728: at exactly
-/// 72 chunks the parallel path reserves the final chunk and bails out because <c>items &lt; 2</c>,
-/// so 73_729 is the first input that actually reaches the thread pool.
+/// regression spikes at one size instead of averaging away. 32_768 is the last input the serial
+/// tree always handles and 32_769 the first that fans out; 73_728 and 73_729 straddle the length
+/// above which the fan-out no longer yields to other in-flight parallel hashes.
 /// </remarks>
 internal static class Sizes
 {
@@ -55,7 +55,7 @@ public class OptimizationBenchmarks
     // Includes 1 MB and 10 MB: subtree scheduling and parent-reduction changes land in the
     // multithreaded band, so leaving the decision run at 128 KB would give the largest planned
     // changes no before/after coverage at all.
-    [Params(4, 128, 1_024, 1_025, 2_048, 4_095, 4_096, 4_097, 6_144, 8_192, 16_384, 65_536, 73_729, 131_072, 1_048_576, 10_485_760)]
+    [Params(4, 128, 1_024, 1_025, 2_048, 4_095, 4_096, 4_097, 6_144, 8_192, 16_384, 32_768, 32_769, 49_152, 65_536, 73_728, 73_729, 131_072, 1_048_576, 10_485_760)]
     public int Data_Size;
 
     [GlobalSetup]
@@ -93,7 +93,7 @@ public class OptimizationBenchmarks
         return hash[0];
     }
 
-    // Forced-serial pair. Hash() farms subtrees to the thread pool above ~72 KB, which makes the
+    // Forced-serial pair. Hash() farms subtrees to the thread pool above 32 KB, which makes the
     // one-shot rows above a wall-clock comparison rather than a kernel comparison. These two
     // isolate single-threaded kernel work, where most of the optimization actually lands.
     [Benchmark(Description = "before: Update() [serial]")]
@@ -123,7 +123,7 @@ public class OptimizationBenchmarks
 /// <see cref="OptimizationBenchmarks"/> for that.
 ///
 /// Threading policy is labelled per row because it is not uniform: our one-shot goes parallel
-/// above ~72 KB while every rival here is single-threaded, so the large-input rows compare
+/// above 32 KB while every rival here is single-threaded, so the large-input rows compare
 /// wall-clock latency across differing core counts, not per-core efficiency.
 /// </summary>
 public class CompetitiveBenchmarks

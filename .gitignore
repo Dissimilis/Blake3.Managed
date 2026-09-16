@@ -35,6 +35,7 @@ Desktop.ini
 .DS_Store
 [Cc]*.md
 [Aa]*.md
+!CLAUDE.md
 /publish
 /publish-arm64
 publish-arm64.tar.gz

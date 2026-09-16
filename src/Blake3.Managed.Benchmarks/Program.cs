@@ -18,6 +18,7 @@ namespace Blake3.Managed.Benchmarks;
 ///   dotnet run -c Release -- --competitive   where we stand against native / xoofx / CryptoHives
 ///   dotnet run -c Release -- --api           our own API surfaces against each other
 ///   dotnet run -c Release -- --xof           CryptoHives-style absorb/squeeze/reset workload
+///   dotnet run -c Release -- --concurrent    aggregate MB/s with 1/8/16 callers, before vs after
 ///   dotnet run -c Release -- --all           all comparison and API suites
 ///   dotnet run -c Release -- --report        breadth for reporting (README numbers)
 ///   dotnet run -c Release -- --quick         smoke test only -- see the warning below
@@ -73,6 +74,11 @@ public static class Program
         }
 
         Console.WriteLine();
+
+        if (flags.Contains("--concurrent"))
+        {
+            return ConcurrentThroughput.Run(args);
+        }
 
         var config = BuildConfig(quick, report);
 
@@ -192,6 +198,7 @@ public static class Program
         || arg.Equals("--dispatch", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--kernel", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--xof", StringComparison.OrdinalIgnoreCase)
+        || arg.Equals("--concurrent", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--api", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--all", StringComparison.OrdinalIgnoreCase)
         || arg.Equals("--quick", StringComparison.OrdinalIgnoreCase)
