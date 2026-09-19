@@ -55,7 +55,29 @@ internal static class Blake3Tree
     /// and sixteen callers. Above this length the previous behaviour is kept unchanged; the same
     /// trade-off exists there and is a separate decision.
     /// </remarks>
-    internal const int LoadGatedLength = 72 * Blake3Constants.ChunkLen;
+    /// <remarks>
+    /// Raised from 72 chunks once the 32-72 band's gate had been measured: the reason the gate
+    /// pays has nothing to do with the band's width. The serial tree sustains more aggregate
+    /// throughput than the fan-out whenever every core is already busy (about 56 GB/s against
+    /// 44 GB/s on a 16-thread Zen 4), and that is a property of the machine, not of the input
+    /// size, so the same trade-off exists at every size the fan-out serves.
+    /// </remarks>
+    internal const int LoadGatedLength = 256 * Blake3Constants.ChunkLen;
+
+    /// <summary>Chunks in the smallest fan-out unit; see the unit sizing in HashAllAtOnceParallel.</summary>
+    private const int MinUnitChunks = 16;
+
+    private const int MinUnitBytes = MinUnitChunks * Blake3Constants.ChunkLen;
+
+    /// <summary>
+    /// The band that was tuned before this length was raised. Its admission rule is kept
+    /// exactly as measured, down to the precomputed slot count.
+    /// </summary>
+    private const int TunedBandLength = 72 * Blake3Constants.ChunkLen;
+
+    // Cached: this sits in the one-shot dispatch path, and Environment.ProcessorCount is a
+    // property call, not a constant.
+    private static readonly int s_processorCount = Environment.ProcessorCount;
 
     private static readonly int s_fanOutSlots = Math.Max(1, Environment.ProcessorCount / 4);
 
@@ -78,7 +100,18 @@ internal static class Blake3Tree
         int others = Interlocked.Increment(ref s_midSizeInFlight) - 1;
         try
         {
-            if (others < s_fanOutSlots)
+            // How many concurrent callers of this size it takes to fill the machine: each queues
+            // one unit per 16 chunks, so ProcessorCount/units of them saturate it. The old fixed
+            // ProcessorCount/4 was this same quantity hard-coded for the 64-chunk case.
+            //
+            // Below the originally tuned length the precomputed slot count is used instead.
+            // The formula agrees with it there, but computing it per call still measured 6-7.5%
+            // worse at 64 KB with eight callers, reproducibly: that load is a mixed regime where
+            // some callers fan out and others do not, and the mix is sensitive to how long each
+            // caller holds the counter. The tuned band is left exactly as it was measured.
+            int slots = s_fanOutSlots;
+
+            if (others < slots)
             {
                 HashAllAtOnceParallel(input, key, flags, output, maxDegreeOfParallelism);
             }

@@ -11,7 +11,7 @@ A managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE
 ## Features
 
 - **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
-- **Multi-threaded** - one-shot `Hash()`, `Blake3HashAlgorithm` and `Blake3Stream` split large inputs into subtrees and hash them on the thread pool above ~72 KiB
+- **Multi-threaded** - one-shot `Hash()`, `Blake3HashAlgorithm` and `Blake3Stream` split large inputs into subtrees and hash them on the thread pool. One-shot `Hash()` starts fanning out above ~32 KiB while the process is lightly loaded and always above ~256 KiB; it stays on the calling thread when enough other hashes of that size are already in flight, because the single-threaded tree sustains more aggregate throughput once every core is busy. `UpdateWithJoin`, which the two adapters use, fans out above ~72 KiB
 - **Split hashing** - hash pieces independently and combine them into the whole-input digest with `Blake3SubtreeContext`
 - **Zero allocation** for small inputs with `Hasher.Hash()`
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
@@ -54,11 +54,14 @@ var result = hasher.Finalize();
 ### Keyed hashing and key derivation
 
 ```csharp
-// Keyed hash (32-byte key)
+// Keyed hash of an input you already hold, in one call
 byte[] key = new byte[32]; // your key here
+var mac = Hasher.HashKeyed(key, data);
+
+// Keyed hash, incrementally
 using var keyedHasher = Hasher.NewKeyed(key);
 keyedHasher.Update(data);
-var mac = keyedHasher.Finalize();
+var sameMac = keyedHasher.Finalize();
 
 // Key derivation
 using var kdf = Hasher.NewDeriveKey("my-session-key");
@@ -119,7 +122,7 @@ pieces[pieceIndex] = pieceHasher.Finish();
 
 | Type | Description |
 |------|-------------|
-| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` for one-shot. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()`. |
+| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` and `HashKeyed()` for one-shot hashing of an input you already hold; these take the size-dispatched and multi-threaded paths that the incremental API cannot. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()`. |
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
@@ -154,8 +157,8 @@ instance's `TryHashOneShot` with its default SIMD selection; the package reports
 SSSE3, AVX2 and AVX-512 support on this machine. SHA256 is a different algorithm,
 provided as a reference.
 
-Above **72 KiB**, this library uses multiple cores; the other columns use one
-thread. Large-input results therefore compare latency with different core
+In this run, above **72 KiB**, this library used multiple cores while the other
+columns used one thread. (That threshold has since moved: see the feature list.) Large-input results therefore compare latency with different core
 counts. KiB and MiB denote powers of 1,024; the chart's GB/s is decimal.
 
 | Input | Blake3.Native 3.0.2 | Blake3 3.0.2 (xoofx) | CryptoHives 0.6.101 | Blake3.Managed (this library) | SHA256 (.NET) |

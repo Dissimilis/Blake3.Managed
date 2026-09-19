@@ -115,6 +115,29 @@ public class OptimizationBenchmarks
         hasher.Finalize(hash);
         return hash[0];
     }
+
+    // UpdateWithJoin is what Blake3HashAlgorithm and Blake3Stream call, so it is the path most
+    // real .NET consumers reach, and it has its own thread-pool fan-out separate from the
+    // one-shot tree's. Nothing in the decision harness covered it before.
+    [Benchmark(Description = "before: UpdateWithJoin()")]
+    public byte BeforeJoin()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        using var hasher = BaselineHasher.New();
+        hasher.UpdateWithJoin(_data);
+        hasher.Finalize(hash);
+        return hash[0];
+    }
+
+    [Benchmark(Description = "after:  UpdateWithJoin()")]
+    public byte AfterJoin()
+    {
+        Span<byte> hash = stackalloc byte[32];
+        using var hasher = ManagedHasher.New();
+        hasher.UpdateWithJoin(_data);
+        hasher.Finalize(hash);
+        return hash[0];
+    }
 }
 
 /// <summary>

@@ -5,6 +5,24 @@ using System.Runtime.Intrinsics.Arm;
 
 namespace Blake3.Managed.Internal;
 
+/// <summary>
+/// NEON single-block compression. <b>Deliberately not wired into
+/// <see cref="Blake3Core.CompressInPlace"/> or <see cref="Blake3Core.CompressCv"/></b>; the ARM64
+/// single-block path uses <see cref="CompressScalar"/> instead, and that is not an oversight.
+/// </summary>
+/// <remarks>
+/// Measured on a Cortex-A73 (.NET 10, 2026-09-19) by dispatching to this class:
+/// <b>2.6x slower</b> for inputs up to 4 KB, where every compression is a single block, and
+/// 10-29% slower from there to 10 MB. BLAKE3's sixteen state words fit in ARM64's thirty-one
+/// integer registers with no shuffles at all, whereas this kernel has to re-diagonalise the
+/// state with EXT every round on a NEON unit that is only two 64-bit pipes wide. Vectorising
+/// pays for the multi-chunk kernel, where <see cref="HashManyNeon"/> keeps four chunks in four
+/// lanes and never diagonalises, and it does not pay here.
+///
+/// Kept because it is correct, is covered by the test suite, and is the starting point for any
+/// future attempt on a wider ARM core (Neoverse or Apple silicon, four 128-bit pipes), where the
+/// trade-off may well go the other way. Re-measure before wiring it in.
+/// </remarks>
 internal static class CompressNeon
 {
     public static bool IsSupported => AdvSimd.Arm64.IsSupported;
@@ -16,6 +34,10 @@ internal static class CompressNeon
     private static Vector128<uint> Rot16(Vector128<uint> v)
         => AdvSimd.ReverseElement16(v.AsInt32()).AsUInt32();
 
+    // Deliberately three ops rather than SRI. ShiftRightAndInsert is one instruction fewer,
+    // but its destination is also a source, so it serialises behind the shift feeding it,
+    // while the two shifts here are independent and dual-issue on the A73's two NEON pipes.
+    // Measured on a Cortex-A73 (2026-09-19): SRI was 3-5% slower at every size from 4 KB up.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<uint> Rot12(Vector128<uint> v)
         => AdvSimd.Or(AdvSimd.ShiftRightLogical(v, 12), AdvSimd.ShiftLeftLogical(v, 20));
@@ -56,8 +78,11 @@ internal static class CompressNeon
         row1 = Rot7(AdvSimd.Xor(row1, row2));
     }
 
+    // NoInlining for the same reason HashTwo and HashFour carry it: a large register-only
+    // kernel with no stackalloc is the shape Tier1 with PGO inlined into its caller on x86,
+    // costing 4-5x at 2 KB.
     [SkipLocalsInit]
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
     private static unsafe void DoRounds(ref Vector128<uint> row0, ref Vector128<uint> row1,
                                         ref Vector128<uint> row2, ref Vector128<uint> row3,
                                         uint* b)

@@ -109,6 +109,11 @@ public unsafe struct Hasher : IDisposable
             // same work plus the hand-off.
             Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
         }
+        else if (Blake3Tree.IsMidSize(input.Length))
+        {
+            // 32-72 chunks: fans out only while the process is lightly loaded.
+            Blake3Tree.HashMidSize(input, Blake3Constants.IV, 0, hash.AsSpan(), degree);
+        }
         else
         {
             Blake3Core.HashLargeParallel(input, Blake3Constants.IV, 0, hash.AsSpan(),
@@ -170,6 +175,10 @@ public unsafe struct Hasher : IDisposable
         else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
         {
             Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
+        }
+        else if (Blake3Tree.IsMidSize(input.Length))
+        {
+            Blake3Tree.HashMidSize(input, Blake3Constants.IV, 0, output, degree);
         }
         else
         {

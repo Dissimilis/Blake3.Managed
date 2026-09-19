@@ -79,6 +79,12 @@ public unsafe struct Hasher : IDisposable
         // the same reading, or a concurrent setter could send a call that took the "serial"
         // branch into the pool uncapped. It cannot change the digest either way, only the
         // schedule, but a call should honour one setting rather than two.
+        //
+        // Deliberately read here rather than pushed below the serial branches. Doing that saves
+        // an acquire load on short inputs, but it reshapes this dispatch and measured 6-7.5%
+        // worse at 64 KB with eight concurrent callers, reproducibly across three runs: that
+        // load is a mixed regime where some callers fan out and others do not, and it is
+        // sensitive to the cost and layout of this path. The load is not worth the risk.
         int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
 
         if (input.Length <= Blake3Constants.BlockLen && CompressSse41.IsSupported)
@@ -111,7 +117,7 @@ public unsafe struct Hasher : IDisposable
         }
         else if (Blake3Tree.IsMidSize(input.Length))
         {
-            // 32-72 chunks: fans out only while the process is lightly loaded.
+            // Load-gated band: fans out only while the process is lightly loaded.
             Blake3Tree.HashMidSize(input, Blake3Constants.IV, 0, hash.AsSpan(), degree);
         }
         else
@@ -121,6 +127,76 @@ public unsafe struct Hasher : IDisposable
         }
 
         return hash;
+    }
+
+    /// <summary>
+    /// The keyed hash function, as a one-shot over an input that is already in hand.
+    /// </summary>
+    /// <param name="key">The 32-byte key.</param>
+    /// <param name="input">The input data to hash.</param>
+    /// <returns>The calculated 256-bit/32-byte keyed hash.</returns>
+    /// <remarks>
+    /// The same dispatch ladder as the unkeyed <see cref="Hash(ReadOnlySpan{byte})"/>, which the
+    /// keyed mode could not reach before: keyed callers had to go through NewKeyed, Update and
+    /// Finalize, and the incremental state cannot use the tree, because it must assume more
+    /// input may arrive. The digest is identical to that sequence for the same key and input.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The key is not 32 bytes.</exception>
+    [SkipLocalsInit]
+    public static Hash HashKeyed(ReadOnlySpan<byte> key, ReadOnlySpan<byte> input)
+    {
+        if (key.Length != Blake3.Managed.Hash.Size)
+        {
+            throw new ArgumentOutOfRangeException(nameof(key), "Expecting the key to be 32 bytes");
+        }
+
+        Unsafe.SkipInit(out Blake3.Managed.Hash hash);
+
+        Span<uint> keyWords = stackalloc uint[8];
+        Blake3Core.WordsFromLeBytes(key, keyWords);
+
+        HashWithKey(keyWords, Blake3Constants.KeyedHash, input, hash.AsSpan());
+        return hash;
+    }
+
+    /// <summary>
+    /// Shared body for the keyed one-shot paths: the unkeyed ladder with a caller-supplied key
+    /// and domain-separation flags.
+    /// </summary>
+    /// <remarks>
+    /// The short-input compressors the unkeyed path uses are specialised on the IV and on zero
+    /// flags, so they cannot serve a keyed hash; the general single-chunk and tree entries below
+    /// take both. Everything above one chunk is the same code the unkeyed hash runs.
+    /// </remarks>
+    [SkipLocalsInit]
+    private static void HashWithKey(ReadOnlySpan<uint> keyWords, uint flags,
+        ReadOnlySpan<byte> input, Span<byte> output)
+    {
+        if (input.Length <= Blake3Constants.ChunkLen)
+        {
+            Blake3Core.HashOneChunkRoot32(keyWords, 0, flags, output, input);
+        }
+        else if (input.Length <= Blake3Tree.MaxUsefulLength)
+        {
+            Blake3Tree.HashAllAtOnce(input, keyWords, flags, output);
+        }
+        else
+        {
+            int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
+
+            if (degree == 1)
+            {
+                Blake3Tree.HashAllAtOnce(input, keyWords, flags, output);
+            }
+            else if (Blake3Tree.IsMidSize(input.Length))
+            {
+                Blake3Tree.HashMidSize(input, keyWords, flags, output, degree);
+            }
+            else
+            {
+                Blake3Core.HashLargeParallel(input, keyWords, flags, output, degree);
+            }
+        }
     }
 
     /// <summary>

@@ -31,9 +31,67 @@ internal static class Blake3Tree
         : 1;
 
     /// <summary>
-    /// Largest input the serial tree handles before the parallel one takes over.
+    /// Largest input the serial tree always handles. Above it a single caller on an idle
+    /// machine gains from the thread-pool fan-out: four 16-chunk units measured 2-2.6x faster
+    /// than one thread at 48-64 KB on two Zen 4 hosts (2026-09-15/16).
     /// </summary>
-    internal const int MaxUsefulLength = 72 * Blake3Constants.ChunkLen;
+    internal const int MaxUsefulLength = 32 * Blake3Constants.ChunkLen;
+
+    /// <summary>
+    /// Up to this length the fan-out yields when enough other mid-size hashes are in flight.
+    /// </summary>
+    /// <remarks>
+    /// The fan-out only pays when there are idle cores to absorb the units. With sixteen callers
+    /// hashing 48-64 KB inputs concurrently, the serial tree sustained about 56 GB/s aggregate and
+    /// the parallel path about 44 GB/s on a 16-thread Zen 4 (2026-09-16): every unit hand-off is
+    /// pure overhead once the machine is saturated. Inputs in this band split into four units, so
+    /// while fewer than ProcessorCount / 4 other hashes of this band are running, each fans out.
+    ///
+    /// The count covers both paths on purpose. Gating on running <em>parallel</em> hashes alone
+    /// produced a mix of serial and parallel callers, and the mix measured worse than either
+    /// extreme: admitting one parallel hash at a time cost 10% at eight callers, admitting four
+    /// cost 8-11% at sixteen. Counting every caller switches the whole band together, so a load
+    /// above the threshold runs all-serial, which matched the old cutoff within noise at eight
+    /// and sixteen callers. Above this length the previous behaviour is kept unchanged; the same
+    /// trade-off exists there and is a separate decision.
+    /// </remarks>
+    internal const int LoadGatedLength = 72 * Blake3Constants.ChunkLen;
+
+    private static readonly int s_fanOutSlots = Math.Max(1, Environment.ProcessorCount / 4);
+
+    private static int s_midSizeInFlight;
+
+    /// <summary>
+    /// Whether a one-shot hash of <paramref name="length"/> bytes needs the load-gated
+    /// dispatch in <see cref="HashMidSize"/> rather than the serial tree.
+    /// </summary>
+    internal static bool IsMidSize(int length) =>
+        length > MaxUsefulLength && length <= LoadGatedLength;
+
+    /// <summary>
+    /// Hashes a mid-size input (see <see cref="IsMidSize"/>) with the thread-pool tree while the
+    /// process is lightly loaded and with the serial tree otherwise.
+    /// </summary>
+    internal static void HashMidSize(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key, uint flags,
+        Span<byte> output, int maxDegreeOfParallelism)
+    {
+        int others = Interlocked.Increment(ref s_midSizeInFlight) - 1;
+        try
+        {
+            if (others < s_fanOutSlots)
+            {
+                HashAllAtOnceParallel(input, key, flags, output, maxDegreeOfParallelism);
+            }
+            else
+            {
+                HashAllAtOnce(input, key, flags, output);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref s_midSizeInFlight);
+        }
+    }
 
     /// <summary>
     /// Hashes <paramref name="input"/> (which must be longer than one chunk) and writes root

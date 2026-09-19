@@ -58,9 +58,9 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Requires AVX-512 VL for the 32-register file; dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14).
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
-- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing.
+- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon` is reachable: the ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class).
 - `HasherState.Update` hashes aligned power-of-two subtrees of 8-64 chunks in `HashAlignedSubtree` (own non-inlined method: inlining it changed the shared loop's register allocation and cost 4% at 8 KB) and reduces them with 8-way parents, including 3-7 parent tails in `ReduceCvs`. Per-chunk CV-stack merging costs seven scalar parent compressions per eight chunks; this measured 10-15% less time for `Update` at 64 KB-10 MB (2026-09-14). The lone 5-8 chunk batch keeps the original `HashMany`; `HashManySerial` there was 6.6% slower at 8 KB.
-- **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`.
+- **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take.
 - **`VectorCompat.cs`** — Cross-TFM compatibility layer for vector load/store operations.
 
 ### Hardware Intrinsics Tiering
@@ -71,10 +71,20 @@ On AVX2 machines, pairs of full chunks left after the wider kernels use `HashTwo
 The 32-byte span-output overload now uses the same small-input compressors as the value-returning
 overload. CryptoHives' comparison calls the span overload, so keep both in performance coverage.
 
-`Hasher.Hash` dispatches by input length: one block, two blocks, one chunk, `Blake3Tree` serial up to 32 KiB, then the load-gated band to 72 KiB (`Blake3Tree.HashMidSize`), then `Blake3Tree` parallel unconditionally. In the band, a hash fans out only while fewer than ProcessorCount/4 other hashes of the band are in flight, counting both paths: a single caller gains 2-2.6x from four 16-chunk units, but sixteen concurrent callers lost 22% aggregate throughput to the same fan-out on a saturated 16-thread Zen 4 machine (2026-09-16). Counting only parallel hashes produced a serial/parallel mix that was worse than either extreme (10% lost at eight callers with one slot, 8-11% at sixteen with four); counting every caller switches the band together and matched the old cutoff within noise at eight and sixteen callers. Each step exists because it measured faster than the more general path below it. The incremental API (`Update`/`Finalize`) cannot use the tree, because it must assume more input may arrive and so cannot keep a wide frontier or stop at two CVs for the root.
+`Hasher.Hash` dispatches by input length: one block, two blocks, one chunk, `Blake3Tree` serial up to 32 KiB, then the load-gated band to 256 KiB (`Blake3Tree.HashMidSize`), then `Blake3Tree` parallel unconditionally. The band was raised from 72 KiB to 256 KiB on 2026-09-19: the serial tree's aggregate advantage on a saturated machine is a property of the machine, not of the band, so the same gate pays above 72 KiB. Measured on the 16-thread Zen 4 host, 16 concurrent callers gained **25.6% at 128 KiB and 21.1% at 256 KiB** aggregate, single-caller latency was unchanged, and eight callers lost 1.3% at 128 KiB and 5.6% at 256 KiB -- the mixed serial/parallel regime that the gate necessarily passes through at intermediate load. In the band, a hash fans out only while fewer than ProcessorCount/4 other hashes of the band are in flight, counting both paths: a single caller gains 2-2.6x from four 16-chunk units, but sixteen concurrent callers lost 22% aggregate throughput to the same fan-out on a saturated 16-thread Zen 4 machine (2026-09-16). Counting only parallel hashes produced a serial/parallel mix that was worse than either extreme (10% lost at eight callers with one slot, 8-11% at sixteen with four); counting every caller switches the band together and matched the old cutoff within noise at eight and sixteen callers. Each step exists because it measured faster than the more general path below it. The incremental API (`Update`/`Finalize`) cannot use the tree, because it must assume more input may arrive and so cannot keep a wide frontier or stop at two CVs for the root.
 
 The serial tree skips frontier reduction for two-chunk inputs and compresses 32-byte roots directly
 into the destination on little-endian machines. Preserve the general Output path for XOF output.
+
+### ARM64
+
+First benchmarked 2026-09-19 on a Cortex-A73/A53 big.LITTLE board. Pin to the big cores and
+record which ones: an unpinned run mixes core types and is not reproducible, and the fast cores
+are not always the low-numbered ones (`lscpu -e`).
+
+Nothing has made the ARM tier faster yet. Both attempts -- SRI rotates, and wiring in the NEON
+single-block compressor -- measured worse; see the dead ends. Those numbers are A73-specific and
+may invert on a wider core.
 
 ## Test Framework
 
@@ -107,6 +117,12 @@ aggregate MB/s with 1, 8 and 16 caller threads, baseline and current alternating
 run it for any change to the parallel dispatch, because BenchmarkDotNet only sees one caller on an
 idle machine. Add `--filter "*(Data_Size: 128)*"` to narrow any of them.
 
+If a run is wrapped in a lock, launch it with `MSBUILDDISABLENODEREUSE=1
+DOTNET_CLI_USE_MSBUILD_SERVER=0`. Otherwise the run's MSBuild worker nodes inherit the lock file
+descriptor and keep holding it after the run exits, so the next attempt fails instantly with an
+empty log and a non-zero exit. `fuser -v <lockfile>` names the holders; `dotnet build-server
+shutdown` does not release them.
+
 ### Rules that were learned the hard way
 
 - **A correctness gate runs before every benchmark session** (~7,000 checks: official vectors, keyed,
@@ -124,6 +140,13 @@ idle machine. Add `--filter "*(Data_Size: 128)*"` to narrow any of them.
   to 32 chunks halved 64 KB `Hash()` for one caller and cost 22% with sixteen concurrent callers,
   because the parallel path sustains ~44 GB/s aggregate against ~56 GB/s for the serial tree once
   every core is busy. Check `--concurrent` before moving any parallel threshold.
+- **Check whether the code you are measuring actually runs.** Two ARM changes measured at exactly
+  1.000 before a grep for callers showed the class they touched had none. When a verdict is a flat
+  1.000 across every size, suspect the harness or the dispatch before concluding "no effect".
+- **A verdict at a size the change cannot reach measures noise, so use it to calibrate the rest.**
+  The `UpdateWithJoin` port only executes at four of the twenty sizes. The +7.7% and -5.8% it
+  "scored" at sizes that fall back to `Update` put that session's noise floor near 6-8%, which is
+  the right lens for the +4% readings in the same table.
 - **Compare candidate shapes in a single run** (`--dispatch`). Cross-run comparison on a throttling laptop
   has reversed the answer more than once.
 - **Regenerate the README chart from the same run as the table**, so they cannot drift:
@@ -131,6 +154,28 @@ idle machine. Add `--filter "*(Data_Size: 128)*"` to narrow any of them.
 
 ### Known dead ends
 
+- **Replacing the `stackalloc Vector256<uint>[16]` message array in `HashManyAvx2` with 16 named locals.**
+  RyuJIT already folds `m[i]` into the ALU memory operand: a disassembly dump shows 121 folded ops
+  (`vpaddd ymm0, ymm0, ymmword ptr [rbp-0x130]`), zero separate stack loads and zero spills, with
+  ymm16-31 live. Sixteen more live vectors would exhaust the register file and spill. While you are in
+  that dump: all four rotates already emit `vprord` via the AVX-512 VL path, so there is no `vpshufb`
+  left to replace. The mnemonics are EVEX forms, so grep for `vprord`/`vpxord`/`vmovups`.
+- **Reading `s_maxDegreeOfParallelism` below the serial branches in `Hasher.Hash`** instead of once at
+  the top. It saves an acquire load on short inputs and measured **6-7.5% worse at 64 KB with eight
+  concurrent callers, reproducibly across three runs**: that load is a mixed regime where some callers
+  fan out and others do not, and it is sensitive to the shape of this dispatch. Any edit to the
+  one-shot dispatch ladder needs `--concurrent`, not just the adaptive job.
+- **Wiring `CompressNeon` into the single-block dispatch on ARM64.** It looks like an obvious gap --
+  `Blake3Core.CompressInPlace`/`CompressCv` dispatch SSE4.1 then straight to scalar, so ARM runs the
+  portable compressor and the NEON one has no callers at all. Dispatching to it measured **2.6x slower
+  up to 4 KB** and 10-29% slower to 10 MB on a Cortex-A73. BLAKE3's sixteen state words fit in ARM64's
+  thirty-one integer registers with no shuffles, while the NEON kernel re-diagonalises with EXT every
+  round on a two-pipe 64-bit NEON unit. Vectorising pays in `HashManyNeon`, which keeps four chunks in
+  four lanes and never diagonalises. Re-measure before trying this on a wider ARM core.
+- **`AdvSimd.ShiftRightAndInsert` (SRI) for the NEON Rot12/Rot7 rotates.** One instruction fewer than
+  shift/shift/or, and **3-5% slower at every size from 4 KB up** on Cortex-A73: SRI's destination is
+  also a source, so it serialises behind the shift feeding it, while the two shifts in the original
+  form are independent and dual-issue on the A73's two NEON pipes.
 - Hoisting the first block out of the fused chunk loop to make the middle-block state row constant: tried
   twice, measured worse both times. The two-block win came from removing the loop entirely for a known
   block count.
