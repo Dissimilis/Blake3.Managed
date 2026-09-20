@@ -2,6 +2,8 @@
 
 A managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) hash function for .NET, with no native dependencies.
 
+One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAKE3 without shipping a native library, or if you hash large inputs: its default one-shot `Hash()` spreads large inputs across the thread pool, which the other .NET packages only do through an explicit `UpdateWithJoin` call. On a single thread it is in the same range as the Rust binding, sometimes ahead and sometimes behind. If you only hash small inputs and want the last few percent, or you need an implementation someone else has audited, use [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native) instead.
+
 [![NuGet](https://img.shields.io/nuget/v/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![CI](https://github.com/Dissimilis/Blake3.Managed/actions/workflows/ci.yml/badge.svg)](https://github.com/Dissimilis/Blake3.Managed/actions/workflows/ci.yml)
@@ -11,21 +13,27 @@ A managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE
 ## Features
 
 - **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
-- **Multi-threaded** - one-shot `Hash()`, `Blake3HashAlgorithm` and `Blake3Stream` split large inputs into subtrees and hash them on the thread pool. One-shot `Hash()` starts fanning out above ~32 KiB while the process is lightly loaded and always above ~256 KiB; it stays on the calling thread when enough other hashes of that size are already in flight, because the single-threaded tree sustains more aggregate throughput once every core is busy. `UpdateWithJoin`, which the two adapters use, fans out above ~72 KiB
+- **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out above ~72 KiB on AVX2 hardware
 - **Split hashing** - hash pieces independently and combine them into the whole-input digest with `Blake3SubtreeContext`
 - **Zero allocation** for small inputs with `Hasher.Hash()`
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
 - **XOF support** - extendable output with a seekable byte stream and AVX2 batching for long output
 - **Familiar API** - modeled after [Blake3.NET](https://github.com/xoofx/Blake3.NET)
-- **Targets** `net6.0`, `net8.0` and `net10.0`, with Native AOT support
+- **Targets** `net6.0`, `net8.0` and `net10.0`, with Native AOT support on `net8.0` and above
 
 ## Other BLAKE3 packages
 
-[Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel provides two packages in version 3.x: `Blake3`, a managed SIMD implementation, and `Blake3.Native`, a binding to the Rust implementation.
+[Blake3.NET](https://github.com/xoofx/Blake3.NET) by Alexandre Mutel ships two packages in 3.x: [`Blake3`](https://www.nuget.org/packages/Blake3), a managed SIMD implementation, and [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native), a binding to the Rust implementation.
 
-Blake3.Managed also supports .NET 6 and uses multiple cores for large one-shot hashes. Set `Hasher.MaxDegreeOfParallelism` to limit its thread usage when your application already processes multiple inputs in parallel.
+Both hash on one thread unless you call `UpdateWithJoin` explicitly; here the plain `Hash()` also uses multiple cores for large inputs. It targets .NET 6 as well as 8 and 10. If your application already hashes many inputs in parallel, set `Hasher.MaxDegreeOfParallelism` so the two layers do not compete.
 
 The [benchmarks below](#performance) compare these packages, CryptoHives and SHA256, with separate results for one-shot hashing and extended output.
+
+## Correctness
+
+BLAKE3 has one right answer. CI runs the official test vectors for all three modes. A differential suite against the reference Rust implementation runs before every benchmark session, covering chunk and block boundaries, incremental splits, unaligned spans and extended output at arbitrary offsets.
+
+It has not had an independent security audit. If that matters to you, use a binding to the reference implementation.
 
 ## Installation
 
@@ -74,8 +82,12 @@ var derivedKey = kdf.Finalize();
 ```csharp
 using var xof = Hasher.New();
 xof.Update(data);
+
 var extendedOutput = new byte[1024];
-xof.Finalize(extendedOutput); // arbitrary length output
+xof.Finalize(extendedOutput);          // arbitrary length output
+
+var later = new byte[64];
+xof.Finalize(1_000_000, later);        // read from any offset in the output stream
 ```
 
 ### Parallel hashing
@@ -93,6 +105,26 @@ Hasher.MaxDegreeOfParallelism = 4;  // use at most 4 threads
 Hasher.MaxDegreeOfParallelism = 1;  // run on the calling thread
 Hasher.MaxDegreeOfParallelism = -1; // restore the default
 ```
+
+### Streams and `HashAlgorithm`
+
+`Blake3Stream` hashes data as it passes through, so you can hash a file while copying it:
+
+```csharp
+using var source = File.OpenRead(path);
+using var hashing = new Blake3Stream(source);
+await hashing.CopyToAsync(destination);
+var hash = hashing.ComputeHash();
+```
+
+`Blake3HashAlgorithm` plugs into anything that takes a `System.Security.Cryptography.HashAlgorithm`:
+
+```csharp
+using var algorithm = new Blake3HashAlgorithm();
+byte[] digest = algorithm.ComputeHash(stream);
+```
+
+Both use `UpdateWithJoin`, so large inputs are hashed on multiple cores where AVX2 is available; elsewhere they fall back to a single thread.
 
 ### Hashing independent pieces
 
@@ -118,11 +150,19 @@ while ((n = await stream.ReadAsync(buffer)) > 0)
 pieces[pieceIndex] = pieceHasher.Finish();
 ```
 
+`CreateKeyed` and `CreateDeriveKey` give the same split hashing in the keyed and key-derivation modes.
+
+## Threading and lifetime
+
+`Hasher.Hash` and `Hasher.HashKeyed` are static and safe to call from any number of threads at once. A single `Hasher`, `Blake3Stream` or `Blake3HashAlgorithm` instance is not thread-safe; use one per thread. `Blake3SubtreeContext` is the exception: it exists to be shared, and its pieces can be hashed concurrently and in any order.
+
+`Hasher` is a mutable struct, so copying one copies its state. Pass it by `ref`, and do not store it in a field, a collection or a lambda unless you mean to fork it. `Dispose` zeroes the key material, which matters for keyed and derive-key hashers; the static one-shots need no disposal.
+
 ## Public API
 
 | Type | Description |
 |------|-------------|
-| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` and `HashKeyed()` for one-shot hashing of an input you already hold; these take the size-dispatched and multi-threaded paths that the incremental API cannot. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()`. |
+| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` and `HashKeyed()` for one-shot hashing. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()` and `HashKeyed()`. |
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
@@ -132,14 +172,17 @@ pieces[pieceIndex] = pieceHasher.Finish();
 
 ## Performance
 
+Above ~32 KiB this library's `Hash()` uses multiple cores while the other columns run on one, so the large-input rows below are a core-count difference rather than a per-core one. Per core it lands within roughly 20% of the Rust binding either way, depending on size.
+
 ### Benchmark environment
 
-Measured on **2026-09-09**, with the optimizations included in `v1.5.2`.
+Measured on **2026-09-21**, on the Linux benchmark host rather than a laptop, so the
+numbers are not comparable with the 2026-09-09 tables this replaced.
 
 ```text
-BenchmarkDotNet 0.15.8, Windows 11 (10.0.26200.9168)
-AMD Ryzen 7 PRO 7840U, 8 physical cores / 16 logical threads
-.NET SDK 10.0.303, .NET 10.0.11, X64 RyuJIT with AVX-512 available
+BenchmarkDotNet 0.15.8, Fedora Linux 44
+AMD Ryzen 7 8845HS, 8 physical cores / 16 logical threads
+.NET SDK 10.0.111, .NET 10.0.11, X64 RyuJIT with AVX-512 available
 Report job: 1 launch, 3 warmup iterations, 5 measured iterations
 ```
 
@@ -157,29 +200,29 @@ instance's `TryHashOneShot` with its default SIMD selection; the package reports
 SSSE3, AVX2 and AVX-512 support on this machine. SHA256 is a different algorithm,
 provided as a reference.
 
-In this run, above **72 KiB**, this library used multiple cores while the other
-columns used one thread. (That threshold has since moved: see the feature list.) Large-input results therefore compare latency with different core
-counts. KiB and MiB denote powers of 1,024; the chart's GB/s is decimal.
+From **64 KiB** upward in this run, this library used multiple cores and the other columns
+used one thread, so those rows compare latency at different core counts. KiB and MiB denote
+powers of 1,024; the chart's GB/s is decimal.
 
 | Input | Blake3.Native 3.0.2 | Blake3 3.0.2 (xoofx) | CryptoHives 0.6.101 | Blake3.Managed (this library) | SHA256 (.NET) |
 |---:|---:|---:|---:|---:|---:|
-| 4 B | 98.09 ± 2.18 ns | 101.35 ± 1.06 ns | 109.17 ± 3.30 ns | 71.08 ± 5.79 ns | 224.44 ± 37.28 ns |
-| 128 B | 171.71 ± 2.21 ns | 161.20 ± 4.18 ns | 182.26 ± 6.02 ns | 148.19 ± 2.90 ns | 308.04 ± 27.07 ns |
-| 1 KiB | 1.21 ± 0.01 us | 1.32 ± 0.01 us | 1.35 ± 0.04 us | 1.24 ± 0.01 us | 0.87 ± 0.03 us |
-| 2 KiB | 1.27 ± 0.02 us | 2.78 ± 0.08 us | 2.12 ± 0.15 us | 1.23 ± 0.01 us | 1.55 ± 0.03 us |
-| 4 KiB | 1.74 ± 0.02 us | 5.61 ± 0.02 us | 2.29 ± 0.09 us | 2.03 ± 0.03 us | 2.84 ± 0.06 us |
-| 6 KiB | 3.03 ± 0.07 us | 8.32 ± 0.07 us | 2.41 ± 0.07 us | 2.09 ± 0.02 us | 4.02 ± 0.04 us |
-| 8 KiB | 1.84 ± 0.01 us | 2.30 ± 0.02 us | 2.45 ± 0.04 us | 2.15 ± 0.01 us | 5.28 ± 0.02 us |
-| 16 KiB | 3.09 ± 0.03 us | 3.80 ± 0.03 us | 4.65 ± 0.02 us | 4.06 ± 0.14 us | 10.41 ± 0.02 us |
-| 64 KiB | 11.89 ± 0.04 us | 14.64 ± 0.12 us | 17.51 ± 0.16 us | 15.45 ± 0.13 us | 41.14 ± 0.33 us |
-| 128 KiB | 23.44 ± 0.33 us | 29.11 ± 0.19 us | 38.12 ± 1.30 us | 11.12 ± 0.55 us | 82.75 ± 0.79 us |
-| 1 MiB | 199.79 ± 4.74 us | 289.81 ± 12.93 us | 309.28 ± 10.26 us | 44.42 ± 3.81 us | 663.53 ± 1.91 us |
-| 10 MiB | 2.78 ± 0.13 ms | 4.15 ± 0.32 ms | 4.54 ± 0.75 ms | 0.44 ± 0.02 ms | 6.82 ± 0.13 ms |
+| 4 B | 65.18 ± 0.27 ns | 61.90 ± 0.10 ns | 64.50 ± 0.07 ns | 40.31 ± 0.05 ns | 287.73 ± 0.56 ns |
+| 128 B | 117.84 ± 1.61 ns | 94.23 ± 0.44 ns | 104.49 ± 0.10 ns | 87.75 ± 0.09 ns | 323.89 ± 0.98 ns |
+| 1 KiB | 771.00 ± 0.59 ns | 824.70 ± 0.33 ns | 842.49 ± 0.57 ns | 764.66 ± 0.79 ns | 679.29 ± 1.12 ns |
+| 2 KiB | 784.19 ± 0.90 ns | 1719.95 ± 2.09 ns | 1229.34 ± 1.38 ns | 786.51 ± 0.61 ns | 1086.81 ± 0.66 ns |
+| 4 KiB | 1.07 ± 0.00 us | 3.47 ± 0.00 us | 1.33 ± 0.01 us | 0.99 ± 0.00 us | 1.91 ± 0.00 us |
+| 6 KiB | 1.87 ± 0.01 us | 5.19 ± 0.00 us | 1.45 ± 0.00 us | 1.33 ± 0.00 us | 2.73 ± 0.01 us |
+| 8 KiB | 1.18 ± 0.00 us | 1.43 ± 0.00 us | 1.78 ± 0.01 us | 1.52 ± 0.01 us | 3.60 ± 0.00 us |
+| 16 KiB | 1.99 ± 0.01 us | 2.74 ± 0.01 us | 3.00 ± 0.01 us | 2.57 ± 0.01 us | 6.82 ± 0.00 us |
+| 64 KiB | 7.51 ± 0.01 us | 10.20 ± 0.02 us | 10.51 ± 0.06 us | 4.28 ± 0.10 us | 26.60 ± 0.03 us |
+| 128 KiB | 14.94 ± 0.01 us | 18.53 ± 0.02 us | 22.21 ± 0.10 us | 6.38 ± 0.46 us | 52.39 ± 0.05 us |
+| 1 MiB | 119.69 ± 0.30 us | 174.61 ± 0.34 us | 167.01 ± 0.55 us | 26.42 ± 0.29 us | 418.72 ± 0.57 us |
+| 10 MiB | 1.22 ± 0.00 ms | 1.67 ± 0.01 ms | 1.69 ± 0.01 ms | 0.22 ± 0.00 ms | 4.19 ± 0.00 ms |
 
 ![One-shot hash throughput with the parallel range shaded](img/benchmark.svg)
 
-In this run, the 2 KiB and 6 KiB rows beat all three BLAKE3 competitors. Native
-remains faster at several other single-threaded sizes.
+Of the single-threaded sizes in this run, this library is fastest at 4 B, 128 B, 1 KiB,
+4 KiB and 6 KiB, and native is fastest at 2 KiB, 8 KiB and 16 KiB.
 
 ### Extended output (XOF)
 
@@ -189,16 +232,15 @@ thread. The chart measures the complete operation: absorption, output and reset.
 
 | Output | Blake3.Native 3.0.2 | CryptoHives 0.6.101 | Blake3.Managed (this library) |
 |---:|---:|---:|---:|
-| 128 B | 2.57 ± 0.06 us | 2.98 ± 0.03 us | 3.02 ± 0.08 us |
-| 1 KiB | 3.46 ± 0.04 us | 3.50 ± 0.03 us | 3.09 ± 0.04 us |
-| 8 KiB | 10.62 ± 0.13 us | 5.53 ± 0.02 us | 4.62 ± 0.05 us |
-| 128 KiB | 134.36 ± 1.15 us | 38.03 ± 0.30 us | 33.73 ± 0.08 us |
+| 128 B | 1.55 ± 0.00 us | 1.88 ± 0.00 us | 1.81 ± 0.01 us |
+| 1 KiB | 1.62 ± 0.00 us | 2.24 ± 0.00 us | 1.88 ± 0.01 us |
+| 8 KiB | 2.39 ± 0.00 us | 3.43 ± 0.00 us | 2.94 ± 0.00 us |
+| 128 KiB | 15.51 ± 0.01 us | 24.21 ± 0.03 us | 21.59 ± 0.02 us |
 
 ![BLAKE3 absorb, output and reset latency](img/benchmark-xof.svg)
 
-The batched output path leads this comparison at 1 KiB, 8 KiB and 128 KiB of
-output; native leads at 128 bytes. The XOF numbers are from a separate matched
-run on the same machine.
+Native is fastest at every output length here; this library is ahead of CryptoHives
+throughout. The XOF numbers come from a separate run on the same machine.
 
 ### Reproducing the results
 
@@ -224,9 +266,9 @@ The implementation automatically selects the best available instruction set at r
 
 | Tier | Instructions | Parallelism |
 |------|-------------|-------------|
-| **AVX2** | 256-bit vectors; AVX-512 VL rotates when available | 8-chunk batches, partial batches for 5–7 chunks, 2-chunk remainders, 8-way parent hashing and 8-block XOF output |
+| **AVX2** | 256-bit vectors; AVX-512 VL rotates when available | 8-chunk batches, partial batches for 5–7 chunks, a 3–4 chunk kernel where AVX-512 VL is present, 2-chunk remainders, 8-way parent hashing and 8-block XOF output |
 | **SSE/SSSE3** | 128-bit vectors + shuffle | 4 chunks simultaneously, single-lane SIMD fallback |
-| **ARM NEON** | 128-bit vectors | 4 chunks simultaneously |
+| **ARM NEON** | 128-bit vectors | 4 chunks simultaneously; single blocks use the scalar path |
 | **Scalar** | Pure C# | Portable fallback |
 
 ## Building from Source

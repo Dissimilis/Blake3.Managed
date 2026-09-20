@@ -600,9 +600,15 @@ internal static class Blake3Core
 
                 for (int b = 0; b < subtreeChunks / 8; b++)
                 {
-                    HashManyAvx2.HashMany(
+                    // The interleaved kernel, as the serial one-shot tree uses. A worker always
+                    // has whole eight-chunk batches, which is the shape interleaving was written
+                    // for; the reason it is not used everywhere is that the lone 5-8 chunk batch
+                    // in Update measured 6.6% slower with it, and that case does not arise here.
+                    // Measured 5.6% faster at 1 MB, five runs a side with no overlap between them
+                    // (2026-09-20).
+                    HashManyAvx2.HashManySerial(
                         new ReadOnlySpan<byte>(subtreeBase + b * 8 * chunkLen, 8 * chunkLen),
-                        8, key, counter + (ulong)(b * 8), _flags,
+                        key, counter + (ulong)(b * 8), _flags,
                         cvs.Slice(b * 64, 64));
                 }
 

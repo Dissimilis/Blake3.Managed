@@ -3,30 +3,32 @@
 <desc id="desc">One-shot hashing into a 32-byte destination. Shading marks the parallel range. Both axes use logarithmic scales. Points show measured means; the accompanying table gives confidence margins.</desc>
 <rect width="1200" height="630" fill="white"/>
 <text x="80" y="28" font-size="20" font-weight="600" fill="#202020">BLAKE3 throughput — higher is better</text>
-<text x="80" y="49" font-size="12" fill="#555">AMD Ryzen 7 PRO 7840U (8 cores / 16 threads) · .NET 10.0.11 · 2026-09-09</text>
+<text x="80" y="49" font-size="12" fill="#555">See README for hardware, runtime and measurement details.</text>
 <text x="80" y="67" font-size="11" fill="#555">One-shot hashing into a 32-byte destination. Shading marks the parallel range.</text>
 <rect x="621.6" y="80" width="273.4" height="470" fill="#f0f7f1"/>
 <line x1="621.6" y1="80" x2="621.6" y2="550" stroke="#9dbca4" stroke-dasharray="4 4"/>
-<line x1="80" y1="523.3" x2="895" y2="523.3" stroke="#e4e7e5"/>
-<text x="70" y="527.3" text-anchor="end" font-size="11" fill="#555">0.02</text>
-<line x1="80" y1="468.3" x2="895" y2="468.3" stroke="#e4e7e5"/>
-<text x="70" y="472.3" text-anchor="end" font-size="11" fill="#555">0.05</text>
-<line x1="80" y1="426.7" x2="895" y2="426.7" stroke="#e4e7e5"/>
-<text x="70" y="430.7" text-anchor="end" font-size="11" fill="#555">0.1</text>
-<line x1="80" y1="385.0" x2="895" y2="385.0" stroke="#e4e7e5"/>
-<text x="70" y="389.0" text-anchor="end" font-size="11" fill="#555">0.2</text>
-<line x1="80" y1="330.0" x2="895" y2="330.0" stroke="#e4e7e5"/>
-<text x="70" y="334.0" text-anchor="end" font-size="11" fill="#555">0.5</text>
-<line x1="80" y1="288.4" x2="895" y2="288.4" stroke="#e4e7e5"/>
-<text x="70" y="292.4" text-anchor="end" font-size="11" fill="#555">1</text>
-<line x1="80" y1="246.7" x2="895" y2="246.7" stroke="#e4e7e5"/>
-<text x="70" y="250.7" text-anchor="end" font-size="11" fill="#555">2</text>
-<line x1="80" y1="191.7" x2="895" y2="191.7" stroke="#e4e7e5"/>
-<text x="70" y="195.7" text-anchor="end" font-size="11" fill="#555">5</text>
-<line x1="80" y1="150.1" x2="895" y2="150.1" stroke="#e4e7e5"/>
-<text x="70" y="154.1" text-anchor="end" font-size="11" fill="#555">10</text>
-<line x1="80" y1="108.4" x2="895" y2="108.4" stroke="#e4e7e5"/>
-<text x="70" y="112.4" text-anchor="end" font-size="11" fill="#555">20</text>
+<line x1="80" y1="512.8" x2="895" y2="512.8" stroke="#e4e7e5"/>
+<text x="70" y="516.8" text-anchor="end" font-size="11" fill="#555">0.02</text>
+<line x1="80" y1="463.6" x2="895" y2="463.6" stroke="#e4e7e5"/>
+<text x="70" y="467.6" text-anchor="end" font-size="11" fill="#555">0.05</text>
+<line x1="80" y1="426.4" x2="895" y2="426.4" stroke="#e4e7e5"/>
+<text x="70" y="430.4" text-anchor="end" font-size="11" fill="#555">0.1</text>
+<line x1="80" y1="389.2" x2="895" y2="389.2" stroke="#e4e7e5"/>
+<text x="70" y="393.2" text-anchor="end" font-size="11" fill="#555">0.2</text>
+<line x1="80" y1="340.0" x2="895" y2="340.0" stroke="#e4e7e5"/>
+<text x="70" y="344.0" text-anchor="end" font-size="11" fill="#555">0.5</text>
+<line x1="80" y1="302.8" x2="895" y2="302.8" stroke="#e4e7e5"/>
+<text x="70" y="306.8" text-anchor="end" font-size="11" fill="#555">1</text>
+<line x1="80" y1="265.6" x2="895" y2="265.6" stroke="#e4e7e5"/>
+<text x="70" y="269.6" text-anchor="end" font-size="11" fill="#555">2</text>
+<line x1="80" y1="216.4" x2="895" y2="216.4" stroke="#e4e7e5"/>
+<text x="70" y="220.4" text-anchor="end" font-size="11" fill="#555">5</text>
+<line x1="80" y1="179.2" x2="895" y2="179.2" stroke="#e4e7e5"/>
+<text x="70" y="183.2" text-anchor="end" font-size="11" fill="#555">10</text>
+<line x1="80" y1="142.0" x2="895" y2="142.0" stroke="#e4e7e5"/>
+<text x="70" y="146.0" text-anchor="end" font-size="11" fill="#555">20</text>
+<line x1="80" y1="92.8" x2="895" y2="92.8" stroke="#e4e7e5"/>
+<text x="70" y="96.8" text-anchor="end" font-size="11" fill="#555">50</text>
 <line x1="80.0" y1="550" x2="80.0" y2="555" stroke="#999"/>
 <text x="80.0" y="571" text-anchor="middle" font-size="10.5" fill="#555">4 B</text>
 <line x1="271.1" y1="550" x2="271.1" y2="555" stroke="#999"/>
@@ -52,79 +54,79 @@
 <text x="20" y="315.0" transform="rotate(-90 20 315.0)" text-anchor="middle" font-size="12" fill="#444">Throughput (GB/s, log scale)</text>
 <line x1="80" y1="550" x2="895" y2="550" stroke="#999"/>
 <text x="487.5" y="602" text-anchor="middle" font-size="12" fill="#444">Input size (log scale)</text>
-<path d="M80.0,480.6 L271.1,306.0 L385.8,298.3 L424.0,259.6 L462.2,237.0 L484.6,245.9 L500.5,198.7 L538.7,188.2 L615.1,185.8 L653.4,185.0 L768.0,188.8 L895.0,208.7" fill="none" stroke="#707070" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="80.0" cy="480.6" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 4 B: 0.09809 ± 0.00218 us</title></circle>
-<circle cx="271.1" cy="306.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 B: 0.1717 ± 0.00221 us</title></circle>
-<circle cx="385.8" cy="298.3" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 1 KiB: 1.209 ± 0.00614 us</title></circle>
-<circle cx="424.0" cy="259.6" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 2 KiB: 1.269 ± 0.0151 us</title></circle>
-<circle cx="462.2" cy="237.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 4 KiB: 1.741 ± 0.0156 us</title></circle>
-<circle cx="484.6" cy="245.9" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 6 KiB: 3.03 ± 0.0697 us</title></circle>
-<circle cx="500.5" cy="198.7" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 8 KiB: 1.84 ± 0.00619 us</title></circle>
-<circle cx="538.7" cy="188.2" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 16 KiB: 3.09 ± 0.0322 us</title></circle>
-<circle cx="615.1" cy="185.8" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 64 KiB: 11.89 ± 0.0434 us</title></circle>
-<circle cx="653.4" cy="185.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 KiB: 23.44 ± 0.333 us</title></circle>
-<circle cx="768.0" cy="188.8" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 1 MiB: 199.8 ± 4.74 us</title></circle>
-<circle cx="895.0" cy="208.7" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 10 MiB: 2781 ± 126 us</title></circle>
+<path d="M80.0,452.6 L271.1,298.4 L385.8,287.6 L424.0,251.3 L462.2,230.9 L484.6,239.0 L500.5,198.6 L538.7,189.5 L615.1,186.5 L653.4,186.2 L768.0,186.3 L895.0,187.2" fill="none" stroke="#707070" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="452.6" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 4 B: 0.06518 ± 0.00027 us</title></circle>
+<circle cx="271.1" cy="298.4" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 B: 0.1178 ± 0.00161 us</title></circle>
+<circle cx="385.8" cy="287.6" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 1 KiB: 0.771 ± 0.00059 us</title></circle>
+<circle cx="424.0" cy="251.3" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 2 KiB: 0.7842 ± 0.000896 us</title></circle>
+<circle cx="462.2" cy="230.9" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 4 KiB: 1.073 ± 0.00146 us</title></circle>
+<circle cx="484.6" cy="239.0" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 6 KiB: 1.873 ± 0.00688 us</title></circle>
+<circle cx="500.5" cy="198.6" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 8 KiB: 1.177 ± 0.00139 us</title></circle>
+<circle cx="538.7" cy="189.5" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 16 KiB: 1.985 ± 0.00595 us</title></circle>
+<circle cx="615.1" cy="186.5" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 64 KiB: 7.512 ± 0.00725 us</title></circle>
+<circle cx="653.4" cy="186.2" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 128 KiB: 14.94 ± 0.0113 us</title></circle>
+<circle cx="768.0" cy="186.3" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 1 MiB: 119.7 ± 0.297 us</title></circle>
+<circle cx="895.0" cy="187.2" r="3.5" fill="#707070"><title>Blake3.Native 3.0.2, 10 MiB: 1217 ± 1.17 us</title></circle>
 <line x1="920" y1="92" x2="944" y2="92" stroke="#707070" stroke-width="2"/>
 <text x="954" y="96" font-size="12" fill="#333">Blake3.Native 3.0.2</text>
-<path d="M80.0,482.5 L271.1,302.2 L385.8,303.7 L424.0,306.8 L462.2,307.2 L484.6,306.6 L500.5,212.0 L538.7,200.6 L615.1,198.4 L653.4,198.0 L768.0,211.1 L895.0,232.7" fill="none" stroke="#bc620c" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="80.0" cy="482.5" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 4 B: 0.1013 ± 0.00106 us</title></circle>
-<circle cx="271.1" cy="302.2" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 128 B: 0.1612 ± 0.00418 us</title></circle>
-<circle cx="385.8" cy="303.7" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 1 KiB: 1.323 ± 0.0116 us</title></circle>
-<circle cx="424.0" cy="306.8" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 2 KiB: 2.781 ± 0.0785 us</title></circle>
-<circle cx="462.2" cy="307.2" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 4 KiB: 5.606 ± 0.0243 us</title></circle>
-<circle cx="484.6" cy="306.6" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 6 KiB: 8.319 ± 0.0664 us</title></circle>
-<circle cx="500.5" cy="212.0" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 8 KiB: 2.299 ± 0.0201 us</title></circle>
-<circle cx="538.7" cy="200.6" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 16 KiB: 3.798 ± 0.032 us</title></circle>
-<circle cx="615.1" cy="198.4" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 64 KiB: 14.64 ± 0.125 us</title></circle>
-<circle cx="653.4" cy="198.0" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 128 KiB: 29.11 ± 0.194 us</title></circle>
-<circle cx="768.0" cy="211.1" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 1 MiB: 289.8 ± 12.9 us</title></circle>
-<circle cx="895.0" cy="232.7" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 10 MiB: 4146 ± 324 us</title></circle>
+<path d="M80.0,449.9 L271.1,286.4 L385.8,291.2 L424.0,293.4 L462.2,293.9 L484.6,293.8 L500.5,209.0 L538.7,206.9 L615.1,202.9 L653.4,197.7 L768.0,206.6 L895.0,204.1" fill="none" stroke="#bc620c" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="449.9" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 4 B: 0.0619 ± 0.0001 us</title></circle>
+<circle cx="271.1" cy="286.4" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 128 B: 0.09423 ± 0.000439 us</title></circle>
+<circle cx="385.8" cy="291.2" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 1 KiB: 0.8247 ± 0.000331 us</title></circle>
+<circle cx="424.0" cy="293.4" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 2 KiB: 1.72 ± 0.00209 us</title></circle>
+<circle cx="462.2" cy="293.9" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 4 KiB: 3.473 ± 0.00144 us</title></circle>
+<circle cx="484.6" cy="293.8" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 6 KiB: 5.192 ± 0.0035 us</title></circle>
+<circle cx="500.5" cy="209.0" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 8 KiB: 1.428 ± 0.000921 us</title></circle>
+<circle cx="538.7" cy="206.9" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 16 KiB: 2.745 ± 0.00586 us</title></circle>
+<circle cx="615.1" cy="202.9" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 64 KiB: 10.2 ± 0.017 us</title></circle>
+<circle cx="653.4" cy="197.7" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 128 KiB: 18.53 ± 0.0208 us</title></circle>
+<circle cx="768.0" cy="206.6" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 1 MiB: 174.6 ± 0.339 us</title></circle>
+<circle cx="895.0" cy="204.1" r="3.5" fill="#bc620c"><title>Blake3 3.0.2 (xoofx), 10 MiB: 1670 ± 6.97 us</title></circle>
 <line x1="920" y1="122" x2="944" y2="122" stroke="#bc620c" stroke-width="2"/>
 <text x="954" y="126" font-size="12" fill="#333">Blake3 3.0.2 (xoofx)</text>
-<path d="M80.0,487.0 L271.1,309.6 L385.8,305.0 L424.0,290.4 L462.2,253.3 L484.6,232.1 L500.5,216.0 L538.7,212.7 L615.1,209.1 L653.4,214.2 L768.0,215.0 L895.0,238.2" fill="none" stroke="#8055ad" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="80.0" cy="487.0" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 4 B: 0.1092 ± 0.0033 us</title></circle>
-<circle cx="271.1" cy="309.6" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 B: 0.1823 ± 0.00602 us</title></circle>
-<circle cx="385.8" cy="305.0" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 1 KiB: 1.351 ± 0.0369 us</title></circle>
-<circle cx="424.0" cy="290.4" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 2 KiB: 2.12 ± 0.152 us</title></circle>
-<circle cx="462.2" cy="253.3" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 4 KiB: 2.285 ± 0.0935 us</title></circle>
-<circle cx="484.6" cy="232.1" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 6 KiB: 2.406 ± 0.0697 us</title></circle>
-<circle cx="500.5" cy="216.0" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 8 KiB: 2.454 ± 0.0434 us</title></circle>
-<circle cx="538.7" cy="212.7" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 16 KiB: 4.647 ± 0.023 us</title></circle>
-<circle cx="615.1" cy="209.1" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 64 KiB: 17.51 ± 0.163 us</title></circle>
-<circle cx="653.4" cy="214.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 KiB: 38.12 ± 1.3 us</title></circle>
-<circle cx="768.0" cy="215.0" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 1 MiB: 309.3 ± 10.3 us</title></circle>
-<circle cx="895.0" cy="238.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 10 MiB: 4545 ± 752 us</title></circle>
+<path d="M80.0,452.1 L271.1,291.9 L385.8,292.3 L424.0,275.4 L462.2,242.6 L484.6,225.2 L500.5,220.9 L538.7,211.7 L615.1,204.5 L653.4,207.5 L768.0,204.2 L895.0,204.9" fill="none" stroke="#8055ad" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="452.1" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 4 B: 0.0645 ± 7.2e-05 us</title></circle>
+<circle cx="271.1" cy="291.9" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 B: 0.1045 ± 0.000102 us</title></circle>
+<circle cx="385.8" cy="292.3" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 1 KiB: 0.8425 ± 0.00057 us</title></circle>
+<circle cx="424.0" cy="275.4" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 2 KiB: 1.229 ± 0.00137 us</title></circle>
+<circle cx="462.2" cy="242.6" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 4 KiB: 1.334 ± 0.00608 us</title></circle>
+<circle cx="484.6" cy="225.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 6 KiB: 1.447 ± 0.00209 us</title></circle>
+<circle cx="500.5" cy="220.9" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 8 KiB: 1.783 ± 0.00513 us</title></circle>
+<circle cx="538.7" cy="211.7" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 16 KiB: 3.001 ± 0.0109 us</title></circle>
+<circle cx="615.1" cy="204.5" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 64 KiB: 10.51 ± 0.063 us</title></circle>
+<circle cx="653.4" cy="207.5" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 128 KiB: 22.21 ± 0.0999 us</title></circle>
+<circle cx="768.0" cy="204.2" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 1 MiB: 167 ± 0.55 us</title></circle>
+<circle cx="895.0" cy="204.9" r="3.5" fill="#8055ad"><title>CryptoHives 0.6.101, 10 MiB: 1693 ± 6.85 us</title></circle>
 <line x1="920" y1="152" x2="944" y2="152" stroke="#8055ad" stroke-width="2"/>
 <text x="954" y="156" font-size="12" fill="#333">CryptoHives 0.6.101</text>
-<path d="M80.0,461.2 L271.1,297.2 L385.8,299.9 L424.0,257.7 L462.2,246.1 L484.6,223.7 L500.5,208.0 L538.7,204.6 L615.1,201.6 L653.4,140.2 L768.0,98.5 L895.0,98.0" fill="none" stroke="#24783c" stroke-width="3" stroke-linejoin="round"/>
-<circle cx="80.0" cy="461.2" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 4 B: 0.07108 ± 0.00579 us</title></circle>
-<circle cx="271.1" cy="297.2" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 B: 0.1482 ± 0.0029 us</title></circle>
-<circle cx="385.8" cy="299.9" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 1 KiB: 1.24 ± 0.0142 us</title></circle>
-<circle cx="424.0" cy="257.7" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 2 KiB: 1.229 ± 0.0109 us</title></circle>
-<circle cx="462.2" cy="246.1" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 4 KiB: 2.026 ± 0.0319 us</title></circle>
-<circle cx="484.6" cy="223.7" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 6 KiB: 2.094 ± 0.0206 us</title></circle>
-<circle cx="500.5" cy="208.0" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 8 KiB: 2.148 ± 0.00976 us</title></circle>
-<circle cx="538.7" cy="204.6" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 16 KiB: 4.061 ± 0.144 us</title></circle>
-<circle cx="615.1" cy="201.6" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 64 KiB: 15.45 ± 0.131 us</title></circle>
-<circle cx="653.4" cy="140.2" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 KiB: 11.12 ± 0.549 us</title></circle>
-<circle cx="768.0" cy="98.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 1 MiB: 44.42 ± 3.81 us</title></circle>
-<circle cx="895.0" cy="98.0" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 10 MiB: 440.8 ± 21 us</title></circle>
+<path d="M80.0,426.8 L271.1,282.5 L385.8,287.1 L424.0,251.4 L462.2,226.6 L484.6,220.8 L500.5,212.5 L538.7,203.3 L615.1,156.3 L653.4,140.5 L768.0,105.2 L895.0,96.1" fill="none" stroke="#24783c" stroke-width="3" stroke-linejoin="round"/>
+<circle cx="80.0" cy="426.8" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 4 B: 0.04031 ± 4.7e-05 us</title></circle>
+<circle cx="271.1" cy="282.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 B: 0.08775 ± 9.3e-05 us</title></circle>
+<circle cx="385.8" cy="287.1" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 1 KiB: 0.7647 ± 0.000789 us</title></circle>
+<circle cx="424.0" cy="251.4" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 2 KiB: 0.7865 ± 0.000614 us</title></circle>
+<circle cx="462.2" cy="226.6" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 4 KiB: 0.9917 ± 0.00148 us</title></circle>
+<circle cx="484.6" cy="220.8" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 6 KiB: 1.333 ± 0.00385 us</title></circle>
+<circle cx="500.5" cy="212.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 8 KiB: 1.524 ± 0.00732 us</title></circle>
+<circle cx="538.7" cy="203.3" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 16 KiB: 2.569 ± 0.00743 us</title></circle>
+<circle cx="615.1" cy="156.3" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 64 KiB: 4.278 ± 0.0978 us</title></circle>
+<circle cx="653.4" cy="140.5" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 128 KiB: 6.38 ± 0.461 us</title></circle>
+<circle cx="768.0" cy="105.2" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 1 MiB: 26.42 ± 0.289 us</title></circle>
+<circle cx="895.0" cy="96.1" r="3.5" fill="#24783c"><title>Blake3.Managed (this library), 10 MiB: 223.2 ± 4.33 us</title></circle>
 <line x1="920" y1="182" x2="944" y2="182" stroke="#24783c" stroke-width="3"/>
 <text x="954" y="186" font-size="12" fill="#333">Blake3.Managed (this library)</text>
-<path d="M80.0,530.3 L271.1,341.1 L385.8,278.9 L424.0,271.8 L462.2,266.4 L484.6,262.9 L500.5,262.0 L538.7,261.1 L615.1,260.4 L653.4,260.8 L768.0,260.9 L895.0,262.6" fill="none" stroke="#286fa6" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="80.0" cy="530.3" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 4 B: 0.2244 ± 0.0373 us</title></circle>
-<circle cx="271.1" cy="341.1" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 128 B: 0.308 ± 0.0271 us</title></circle>
-<circle cx="385.8" cy="278.9" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 1 KiB: 0.8741 ± 0.0328 us</title></circle>
-<circle cx="424.0" cy="271.8" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 2 KiB: 1.553 ± 0.0347 us</title></circle>
-<circle cx="462.2" cy="266.4" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 4 KiB: 2.841 ± 0.0607 us</title></circle>
-<circle cx="484.6" cy="262.9" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 6 KiB: 4.02 ± 0.039 us</title></circle>
-<circle cx="500.5" cy="262.0" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 8 KiB: 5.283 ± 0.0224 us</title></circle>
-<circle cx="538.7" cy="261.1" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 16 KiB: 10.41 ± 0.0196 us</title></circle>
-<circle cx="615.1" cy="260.4" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 64 KiB: 41.14 ± 0.327 us</title></circle>
-<circle cx="653.4" cy="260.8" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 128 KiB: 82.75 ± 0.785 us</title></circle>
-<circle cx="768.0" cy="260.9" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 1 MiB: 663.5 ± 1.91 us</title></circle>
-<circle cx="895.0" cy="262.6" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 10 MiB: 6823 ± 131 us</title></circle>
+<path d="M80.0,532.4 L271.1,352.6 L385.8,280.8 L424.0,268.8 L462.2,261.9 L484.6,259.3 L500.5,258.6 L538.7,255.7 L615.1,254.4 L653.4,253.6 L768.0,253.5 L895.0,253.6" fill="none" stroke="#286fa6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="80.0" cy="532.4" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 4 B: 0.2877 ± 0.000561 us</title></circle>
+<circle cx="271.1" cy="352.6" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 128 B: 0.3239 ± 0.000984 us</title></circle>
+<circle cx="385.8" cy="280.8" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 1 KiB: 0.6793 ± 0.00112 us</title></circle>
+<circle cx="424.0" cy="268.8" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 2 KiB: 1.087 ± 0.000655 us</title></circle>
+<circle cx="462.2" cy="261.9" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 4 KiB: 1.911 ± 0.0025 us</title></circle>
+<circle cx="484.6" cy="259.3" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 6 KiB: 2.732 ± 0.00632 us</title></circle>
+<circle cx="500.5" cy="258.6" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 8 KiB: 3.6 ± 0.00449 us</title></circle>
+<circle cx="538.7" cy="255.7" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 16 KiB: 6.817 ± 0.00204 us</title></circle>
+<circle cx="615.1" cy="254.4" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 64 KiB: 26.6 ± 0.0267 us</title></circle>
+<circle cx="653.4" cy="253.6" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 128 KiB: 52.39 ± 0.0549 us</title></circle>
+<circle cx="768.0" cy="253.5" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 1 MiB: 418.7 ± 0.573 us</title></circle>
+<circle cx="895.0" cy="253.6" r="3.5" fill="#286fa6"><title>SHA256 (.NET), 10 MiB: 4191 ± 2.96 us</title></circle>
 <line x1="920" y1="212" x2="944" y2="212" stroke="#286fa6" stroke-width="2"/>
 <text x="954" y="216" font-size="12" fill="#333">SHA256 (.NET)</text>
 <text x="920" y="271" font-size="11" fill="#666">This library: multiple cores</text>

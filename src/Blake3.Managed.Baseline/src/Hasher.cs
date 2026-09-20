@@ -172,30 +172,30 @@ public unsafe struct Hasher : IDisposable
     private static void HashWithKey(ReadOnlySpan<uint> keyWords, uint flags,
         ReadOnlySpan<byte> input, Span<byte> output)
     {
+        // Read here rather than lazily inside the branch that uses it, matching the unkeyed
+        // ladder. Deferring it looks like a free saving for short inputs and is not: on the
+        // unkeyed path it measured 6-7.5% worse at 64 KB with eight concurrent callers,
+        // reproducibly across three runs, because it reshapes the dispatch around a load that
+        // is a mixed serial/parallel regime. Whether that carries over to the keyed path has
+        // not been measured, but matching the shape costs nothing and diverging risks a known
+        // bad one.
+        int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
+
         if (input.Length <= Blake3Constants.ChunkLen)
         {
             Blake3Core.HashOneChunkRoot32(keyWords, 0, flags, output, input);
         }
-        else if (input.Length <= Blake3Tree.MaxUsefulLength)
+        else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
         {
             Blake3Tree.HashAllAtOnce(input, keyWords, flags, output);
         }
+        else if (Blake3Tree.IsMidSize(input.Length))
+        {
+            Blake3Tree.HashMidSize(input, keyWords, flags, output, degree);
+        }
         else
         {
-            int degree = Volatile.Read(ref s_maxDegreeOfParallelism);
-
-            if (degree == 1)
-            {
-                Blake3Tree.HashAllAtOnce(input, keyWords, flags, output);
-            }
-            else if (Blake3Tree.IsMidSize(input.Length))
-            {
-                Blake3Tree.HashMidSize(input, keyWords, flags, output, degree);
-            }
-            else
-            {
-                Blake3Core.HashLargeParallel(input, keyWords, flags, output, degree);
-            }
+            Blake3Core.HashLargeParallel(input, keyWords, flags, output, degree);
         }
     }
 
