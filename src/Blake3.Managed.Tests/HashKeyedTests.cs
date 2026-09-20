@@ -8,6 +8,7 @@ namespace Blake3.Managed.Tests;
 /// one-shot ladder has: single block, two blocks, sub-chunk, exact chunk, the serial tree, the
 /// load-gated band and the unconditional parallel path.
 /// </summary>
+[Collection(ParallelismCollection.Name)]
 public class HashKeyedTests
 {
     private static byte[] MakeKey()

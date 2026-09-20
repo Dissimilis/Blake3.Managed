@@ -8,6 +8,7 @@ namespace Blake3.Managed.Tests;
 /// reach this library, and both had three tests. These cover the wiring rather than the maths:
 /// offsets, reuse, per-byte paths and the framework contracts the adapters claim to honour.
 /// </summary>
+[Collection(ParallelismCollection.Name)]
 public class AdapterContractTests
 {
     private static byte[] Input(int length) => HasherTests.MakeTestInput(length);

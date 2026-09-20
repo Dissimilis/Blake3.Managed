@@ -9,6 +9,7 @@ namespace Blake3.Managed.Tests;
 /// Cross-implementation correctness is anchored by the official test vectors
 /// (up to 102400 bytes), which cover the subtree and parallel paths.
 /// </summary>
+[Collection(ParallelismCollection.Name)]
 public class SubtreeBoundaryTests
 {
     public static TheoryData<int> BoundarySizes => new()

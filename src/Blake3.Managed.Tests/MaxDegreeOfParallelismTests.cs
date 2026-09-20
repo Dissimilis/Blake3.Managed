@@ -7,6 +7,7 @@ namespace Blake3.Managed.Tests;
 /// incremental path produces, at every size that reaches the thread-pool tree. Degree 1 is
 /// the interesting one, since it routes to the serial tree rather than to a one-thread pool.
 /// </summary>
+[Collection(ParallelismCollection.Name)]
 public class MaxDegreeOfParallelismTests
 {
     // 268435456 is the regression case: degree * 4 * 2 overflows int, and before the sizing

@@ -308,7 +308,10 @@ internal static class HashManyAvx2
         VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x31), ref outRef, 56);   // chunk 7
     }
 
-    // Fixed offsets for serial one-shot batches. Parallel workers retain HashMany.
+    // Fixed offsets, for callers that always hand over a whole eight-chunk batch: the serial
+    // one-shot tree, and the UpdateWithJoin workers since 2026-09-20. The plain HashMany stays
+    // for the incremental path, where the final batch can be partial and the second interleaved
+    // chain then has nothing to do -- it measured 6.6% slower there.
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static unsafe void HashManySerial(ReadOnlySpan<byte> chunks,

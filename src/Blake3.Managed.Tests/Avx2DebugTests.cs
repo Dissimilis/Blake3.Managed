@@ -4,6 +4,11 @@ using Blake3.Managed.Internal;
 
 namespace Blake3.Managed.Tests;
 
+// Hashes 20 MB, far above the gated length, so it depends on the parallel dispatch actually
+// running -- which is the whole point of the small-stack test. If another class set the
+// process-wide degree to 1 while this ran, it would quietly measure the serial tree instead and
+// still pass, because the digest does not depend on the schedule.
+[Collection(ParallelismCollection.Name)]
 public class Avx2DebugTests
 {
     [Fact]

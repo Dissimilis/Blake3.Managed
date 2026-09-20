@@ -2,6 +2,7 @@ using System;
 
 namespace Blake3.Managed.Tests;
 
+[Collection(ParallelismCollection.Name)]
 public class StressTests
 {
     private const int DataSize = 8 * 1024 * 1024; // 8 MB

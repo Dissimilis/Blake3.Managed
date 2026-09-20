@@ -1,12 +1,106 @@
 using System;
+using System.Linq;
+using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Blake3.Managed.Internal;
 using Xunit;
 
 namespace Blake3.Managed.Tests;
 
+[Collection(ParallelismCollection.Name)]
 public class FanOutGateTests
 {
+    /// <summary>
+    /// The in-flight counter must come back to zero, including when the hash throws.
+    ///
+    /// <c>HashMidSize</c> increments a process-wide counter, dispatches, and decrements in a
+    /// <c>finally</c>. If that decrement ever stops running on some path -- moved out of the
+    /// <c>finally</c>, or skipped by a new early return -- the count ratchets upward and every
+    /// later mid-size hash in the process permanently takes the serial tree.
+    ///
+    /// Nothing else would notice. Every digest stays correct, so no vector or differential test
+    /// fires, and a benchmark sees a gate that appears to be working: a leaked count of four on
+    /// a sixteen-thread machine just looks like load. The counter is private, so the assertion
+    /// reaches it by reflection rather than leaving the behaviour unpinned.
+    /// </summary>
+    private static int InFlight() =>
+        (int)typeof(Blake3Tree)
+            .GetField("s_midSizeInFlight", BindingFlags.NonPublic | BindingFlags.Static)!
+            .GetValue(null)!;
+
+    /// <summary>
+    /// Waits for the counter to settle at zero before a test starts measuring it. The class
+    /// runs alone, but a hash started by an earlier class can still be finishing as this one
+    /// begins, and that is a scheduling artefact rather than the leak these tests look for.
+    /// </summary>
+    private static void WaitForQuiet()
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (InFlight() != 0 && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(5);
+        }
+
+        Assert.Equal(0, InFlight());
+    }
+
+    [Fact]
+    public void MidSizeGateCounterReturnsToZeroOnTheHappyPath()
+    {
+        var data = new byte[64 * 1024];
+        Assert.True(Blake3Tree.IsMidSize(data.Length), "size must be inside the gated band");
+
+        WaitForQuiet();
+
+        Span<byte> destination = stackalloc byte[32];
+        var key = new byte[32];
+        for (int i = 0; i < 40; i++)
+        {
+            _ = Hasher.Hash(data);
+            Hasher.Hash(data, destination);
+            _ = Hasher.HashKeyed(key, data);
+        }
+
+        Assert.Equal(0, InFlight());
+    }
+
+    /// <summary>
+    /// The path the <c>finally</c> exists for. A key span shorter than eight words faults
+    /// inside the tree, after the counter has been taken.
+    /// </summary>
+    [Fact]
+    public void MidSizeGateCounterReturnsToZeroWhenTheHashThrows()
+    {
+        var data = new byte[64 * 1024];
+        var destination = new byte[32];
+
+        WaitForQuiet();
+
+        Assert.ThrowsAny<Exception>(() =>
+            Blake3Tree.HashMidSize(data, ReadOnlySpan<uint>.Empty, 0, destination, -1));
+
+        Assert.Equal(0, InFlight());
+    }
+
+    /// <summary>
+    /// Concurrent callers take and release the same counter; read after the join, so the
+    /// assertion itself is not racing anything.
+    /// </summary>
+    [Fact]
+    public async Task MidSizeGateCounterReturnsToZeroAfterConcurrentCallers()
+    {
+        var data = new byte[64 * 1024];
+        WaitForQuiet();
+
+        await Task.WhenAll(Enumerable.Range(0, 64).Select(caller => Task.Run(() =>
+        {
+            for (int i = 0; i < 8; i++) _ = Hasher.Hash(data);
+        }))).ConfigureAwait(false);
+
+        Assert.Equal(0, InFlight());
+    }
+
     [Fact]
     public void IsMidSize_CoversExactlyTheGatedBand()
     {

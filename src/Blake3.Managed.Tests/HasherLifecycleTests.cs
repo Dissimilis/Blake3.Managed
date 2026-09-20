@@ -8,6 +8,7 @@ namespace Blake3.Managed.Tests;
 /// the two update entry points. None of these are covered by the vector suites, and each one is
 /// a contract the type either honours or silently breaks.
 /// </summary>
+[Collection(ParallelismCollection.Name)]
 public class HasherLifecycleTests
 {
     private static byte[] Input(int length) => HasherTests.MakeTestInput(length);
@@ -185,6 +186,51 @@ public class HasherLifecycleTests
     }
 
     /// <summary>
+    /// An empty update as the <em>last</em> call before Finalize must change nothing.
+    ///
+    /// Both update entry points return on an empty span before calling FlushPendingCv, and that
+    /// ordering is load-bearing. A complete chunk's chaining value is deliberately left deferred
+    /// because it may turn out to be the final chunk, and Finalize needs it as the root parent's
+    /// right child. Flushing it because an empty span arrived commits it to the CV stack, and
+    /// Finalize then takes its other leg and produces a <em>wrong digest with no exception</em>.
+    ///
+    /// <see cref="EmptyUpdatesBetweenJoinsAreInert"/> cannot catch that: it feeds more data
+    /// afterwards, and a premature flush there is indistinguishable from the flush the next
+    /// update would legitimately do. The bug is only observable when the empty call is last.
+    /// The lengths below all end exactly on a SIMD batch boundary, which is what leaves a CV
+    /// deferred in the first place.
+    /// </summary>
+    [Theory]
+    [InlineData(2048)]
+    [InlineData(4096)]
+    [InlineData(8192)]
+    [InlineData(65_536)]
+    [InlineData(73_728)]
+    [InlineData(131_072)]
+    public void EmptyUpdateAsTheLastCallBeforeFinalizeIsInert(int length)
+    {
+        byte[] data = Input(length);
+        string expected = Digest(data);
+
+        foreach (bool joinFirst in new[] { false, true })
+        foreach (bool emptyViaJoin in new[] { false, true })
+        {
+            using var hasher = Hasher.New();
+
+            if (joinFirst) hasher.UpdateWithJoin(data);
+            else hasher.Update(data);
+
+            if (emptyViaJoin) hasher.UpdateWithJoin(ReadOnlySpan<byte>.Empty);
+            else hasher.Update(ReadOnlySpan<byte>.Empty);
+
+            Assert.Equal(expected, hasher.Finalize().ToString());
+
+            // Finalize is non-destructive, so a second one must agree too.
+            Assert.Equal(expected, hasher.Finalize().ToString());
+        }
+    }
+
+    /// <summary>
     /// An empty update between two real ones must be inert on both entry points, including
     /// immediately after a join has deferred a chunk.
     /// </summary>
@@ -201,6 +247,52 @@ public class HasherLifecycleTests
         hasher.Update(second);
 
         Assert.Equal(Digest(first.Concat(second).ToArray()), hasher.Finalize().ToString());
+    }
+
+    /// <summary>
+    /// Sizes chosen so the parallel join actually runs, and so both of its branches do.
+    ///
+    /// <c>UpdateWithJoin</c> only fans out on a fresh hasher whose chunk buffer is empty and
+    /// whose counter is 64-aligned, and only once the input yields a whole 64-chunk subtree plus
+    /// a second item. Sizes that look large enough often are not: 70,000 bytes gives one subtree
+    /// and no tail batch, so the item count is one and it quietly falls back to <c>Update</c>.
+    /// A joined call that follows any partial chunk falls back too, so a sequence of joined
+    /// updates can run the fan-out exactly never.
+    ///
+    /// The tail cases are the point. 73,729 bytes is one subtree and one tail batch, the
+    /// smallest input that fans out at all; 131,072 is one subtree and seven tail batches.
+    /// Without them the worker's tail branch never executes, and the suite would pass even if
+    /// that branch wrote the wrong chaining values entirely.
+    /// </summary>
+    [Theory]
+    [InlineData(73_729)]     // 1 subtree + 1 tail batch (smallest input that fans out)
+    [InlineData(81_920)]     // 1 subtree + 2 tail batches
+    [InlineData(131_072)]    // 1 subtree + 7 tail batches
+    [InlineData(139_265)]    // 2 subtrees + 1 tail batch
+    [InlineData(200_000)]    // 3 subtrees, no tail batch
+    [InlineData(1_048_576)]  // 15 subtrees + 7 tail batches
+    public void JoinedUpdateOnAFreshHasherMatchesTheSerialPath(int length)
+    {
+        byte[] data = Input(length);
+
+        using (var joined = Hasher.New())
+        {
+            joined.UpdateWithJoin(data);
+            Assert.Equal(Digest(data), joined.Finalize().ToString());
+        }
+
+        // The same shapes through the keyed root, which carries different flags into the worker
+        // but takes the identical dispatch.
+        var key = new byte[32];
+        for (int i = 0; i < key.Length; i++) key[i] = (byte)(i * 5 + 2);
+
+        using var keyedJoined = Hasher.NewKeyed(key);
+        keyedJoined.UpdateWithJoin(data);
+
+        using var keyedSerial = Hasher.NewKeyed(key);
+        keyedSerial.Update(data);
+
+        Assert.Equal(keyedSerial.Finalize().ToString(), keyedJoined.Finalize().ToString());
     }
 
     /// <summary>

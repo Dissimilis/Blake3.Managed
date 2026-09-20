@@ -6,6 +6,7 @@ using System.Text.Json;
 
 namespace Blake3.Managed.Tests;
 
+[Collection(ParallelismCollection.Name)]
 public class HasherTests
 {
     private const string SimpleInput = "BLAKE3";

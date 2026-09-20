@@ -64,21 +64,6 @@ internal static class Blake3Tree
     /// </remarks>
     internal const int LoadGatedLength = 256 * Blake3Constants.ChunkLen;
 
-    /// <summary>Chunks in the smallest fan-out unit; see the unit sizing in HashAllAtOnceParallel.</summary>
-    private const int MinUnitChunks = 16;
-
-    private const int MinUnitBytes = MinUnitChunks * Blake3Constants.ChunkLen;
-
-    /// <summary>
-    /// The band that was tuned before this length was raised. Its admission rule is kept
-    /// exactly as measured, down to the precomputed slot count.
-    /// </summary>
-    private const int TunedBandLength = 72 * Blake3Constants.ChunkLen;
-
-    // Cached: this sits in the one-shot dispatch path, and Environment.ProcessorCount is a
-    // property call, not a constant.
-    private static readonly int s_processorCount = Environment.ProcessorCount;
-
     private static readonly int s_fanOutSlots = Math.Max(1, Environment.ProcessorCount / 4);
 
     private static int s_midSizeInFlight;
@@ -100,15 +85,13 @@ internal static class Blake3Tree
         int others = Interlocked.Increment(ref s_midSizeInFlight) - 1;
         try
         {
-            // How many concurrent callers of this size it takes to fill the machine: each queues
-            // one unit per 16 chunks, so ProcessorCount/units of them saturate it. The old fixed
-            // ProcessorCount/4 was this same quantity hard-coded for the 64-chunk case.
-            //
-            // Below the originally tuned length the precomputed slot count is used instead.
-            // The formula agrees with it there, but computing it per call still measured 6-7.5%
-            // worse at 64 KB with eight callers, reproducibly: that load is a mixed regime where
-            // some callers fan out and others do not, and the mix is sensitive to how long each
-            // caller holds the counter. The tuned band is left exactly as it was measured.
+            // One fixed slot count for the whole band, not one derived from the input size.
+            // Scaling it per call -- ProcessorCount divided by the units this length would queue
+            // -- is the rule the numbers seem to argue for, and it was tried: it measured 6-7.5%
+            // worse at 64 KB with eight callers, reproducibly across three runs, even at sizes
+            // where the formula produces exactly this value. Eight callers at that size is a
+            // mixed regime where some fan out and some do not, and it is sensitive to how long
+            // each caller holds the counter, so the arithmetic is not free. Left as measured.
             int slots = s_fanOutSlots;
 
             if (others < slots)
@@ -349,18 +332,55 @@ internal static class Blake3Tree
             }
         }
 
+        /// <remarks>
+        /// An interrupt must not cut the wait short. `ManualResetEventSlim.Wait` throws
+        /// `ThreadInterruptedException` if the waiting thread is interrupted, and letting that
+        /// escape would unwind the caller out of its `fixed` block and release the pooled CV
+        /// buffer while a worker is still reading both -- the one way the drain guarantee could
+        /// be broken without any item misbehaving. So the interrupt is absorbed, the wait is
+        /// resumed, and the request is re-armed on the way out, which leaves the caller's own
+        /// interrupt semantics intact without abandoning the workers.
+        ///
+        /// The cost is that the interrupt surfaces at whatever the thread blocks on next, rather
+        /// than here. That is the right trade for a hash -- a deferred interrupt is a scheduling
+        /// surprise, an abandoned worker is a use-after-free -- but it does mean a caller cannot
+        /// use `Thread.Interrupt` to cancel a hash promptly. There is no cancellation API, and
+        /// this is not one.
+        /// </remarks>
         private void WaitAll()
         {
-            var spinner = new SpinWait();
-            while (Volatile.Read(ref _done) < _items)
+            bool interrupted = false;
+            try
             {
-                if (spinner.NextSpinWillYield)
+                var spinner = new SpinWait();
+                while (Volatile.Read(ref _done) < _items)
                 {
-                    _event.Wait();
-                    return;
-                }
+                    if (spinner.NextSpinWillYield)
+                    {
+                        while (Volatile.Read(ref _done) < _items)
+                        {
+                            try
+                            {
+                                _event.Wait();
+                            }
+                            catch (ThreadInterruptedException)
+                            {
+                                interrupted = true;
+                            }
+                        }
 
-                spinner.SpinOnce();
+                        return;
+                    }
+
+                    spinner.SpinOnce();
+                }
+            }
+            finally
+            {
+                if (interrupted)
+                {
+                    Thread.CurrentThread.Interrupt();
+                }
             }
         }
     }

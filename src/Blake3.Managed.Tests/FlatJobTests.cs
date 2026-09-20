@@ -164,6 +164,75 @@ public class FlatJobTests
     }
 
     /// <summary>
+    /// Blocks every item that is not running on the caller's own thread, so the caller reaches
+    /// the wait while a worker is still inside Process.
+    /// </summary>
+    private sealed class GatedJob : Blake3Tree.FlatJob
+    {
+        private readonly int _callerThreadId;
+        public readonly ManualResetEventSlim WorkerEntered = new(false);
+        public readonly ManualResetEventSlim Release = new(false);
+
+        public GatedJob(int items, int callerThreadId) : base(items)
+        {
+            _callerThreadId = callerThreadId;
+        }
+
+        protected override void Process(int item)
+        {
+            if (Environment.CurrentManagedThreadId == _callerThreadId)
+            {
+                // The caller must not be able to drain every item before a worker has started,
+                // or it reaches the wait with nothing outstanding and the test proves nothing.
+                // Bounded so a starved pool fails the assertion rather than hanging the run.
+                WorkerEntered.Wait(TimeSpan.FromSeconds(10));
+                return;
+            }
+
+            WorkerEntered.Set();
+            Release.Wait();
+        }
+    }
+
+    /// <summary>
+    /// Interrupting the waiting caller must not release it while a worker is still running.
+    /// `ManualResetEventSlim.Wait` throws `ThreadInterruptedException`, and if that escaped
+    /// `RunOnPool` the caller would leave its `fixed` block and free the pooled buffer with a
+    /// worker still reading both -- a use-after-free reached without any item misbehaving, and
+    /// the one hole the other tests here cannot see, because nothing in them throws.
+    /// </summary>
+    [Fact]
+    public void DoesNotReturnWhenTheWaitingCallerIsInterrupted()
+    {
+        GatedJob job = null!;
+        Thread caller = null!;
+        var started = new ManualResetEventSlim(false);
+
+        caller = new Thread(() =>
+        {
+            job = new GatedJob(items: 8, callerThreadId: Environment.CurrentManagedThreadId);
+            started.Set();
+            job.RunOnPool(Environment.ProcessorCount);
+        })
+        { IsBackground = true };
+
+        caller.Start();
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(job.WorkerEntered.Wait(TimeSpan.FromSeconds(10)),
+            "no worker ever entered Process, so this test proves nothing");
+
+        caller.Interrupt();
+
+        // With the interrupt escaping the wait, the caller returns essentially instantly, so a
+        // generous budget here is not a timing assertion in any meaningful sense.
+        Assert.False(caller.Join(TimeSpan.FromSeconds(2)),
+            "RunOnPool returned while a worker was still running: an interrupt escaped the wait.");
+
+        job.Release.Set();
+        Assert.True(caller.Join(TimeSpan.FromSeconds(30)), "RunOnPool never returned.");
+    }
+
+    /// <summary>
     /// Several faults must not lose the failure or surface something unrelated; exactly one of
     /// them is reported and the rest of the work still drains.
     /// </summary>
