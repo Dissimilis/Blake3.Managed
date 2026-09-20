@@ -998,7 +998,6 @@ internal static class Blake3Core
             // As in Update: new input means a deferred chunk is not the last one.
             if (_hasPendingCv) FlushPendingCv();
             const int subtreeChunks = 64;
-            const int subtreeLen = subtreeChunks * chunkLen;
 
             // The parallel path needs a 64-aligned chunk counter so each 64-chunk
             // subtree is canonical and can be reduced to a single CV by its worker.
