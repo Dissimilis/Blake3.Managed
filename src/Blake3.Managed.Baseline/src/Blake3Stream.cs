@@ -113,7 +113,9 @@ public class Blake3Stream : Stream
         if (value < 0) return value;
         var bValue = (byte) value;
         var span = new ReadOnlySpan<byte>(&bValue, 1);
-        _hasher.UpdateWithJoin(span);
+        // Update, not UpdateWithJoin: one byte can never meet the join path's alignment
+        // preconditions, so the join call only tested them before falling back here anyway.
+        _hasher.Update(span);
         return value;
     }
 
@@ -146,7 +148,8 @@ public class Blake3Stream : Stream
     {
         _stream.WriteByte(value);
         var span = new ReadOnlySpan<byte>(&value, 1);
-        _hasher.UpdateWithJoin(span);
+        // See ReadByte: the join preconditions cannot hold for a single byte.
+        _hasher.Update(span);
     }
 
     public override long Seek(long offset, SeekOrigin origin)

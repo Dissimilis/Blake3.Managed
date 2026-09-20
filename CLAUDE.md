@@ -60,7 +60,7 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
 - **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon` is reachable: the ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class).
 - `HasherState.Update` hashes aligned power-of-two subtrees of 8-64 chunks in `HashAlignedSubtree` (own non-inlined method: inlining it changed the shared loop's register allocation and cost 4% at 8 KB) and reduces them with 8-way parents, including 3-7 parent tails in `ReduceCvs`. Per-chunk CV-stack merging costs seven scalar parent compressions per eight chunks; this measured 10-15% less time for `Update` at 64 KB-10 MB (2026-09-14). The lone 5-8 chunk batch keeps the original `HashMany`; `HashManySerial` there was 6.6% slower at 8 KB.
-- **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take.
+- **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take. Its workers hash their subtrees with the interleaved `HashManySerial`, which is worth 7.5% at 1 MB and 9.3% at 10 MB (2026-09-20): a worker always holds whole eight-chunk batches, the shape interleaving was written for. That is why the same kernel loses 6.6% on the lone 5-8 chunk batch in `Update`, where the batch is partial -- the two cases look alike and are not.
 - **`VectorCompat.cs`** — Cross-TFM compatibility layer for vector load/store operations.
 
 ### Hardware Intrinsics Tiering
@@ -85,6 +85,20 @@ are not always the low-numbered ones (`lscpu -e`).
 Nothing has made the ARM tier faster yet. Both attempts -- SRI rotates, and wiring in the NEON
 single-block compressor -- measured worse; see the dead ends. Those numbers are A73-specific and
 may invert on a wider core.
+
+First competitive numbers, 2026-09-20, pinned to the A73s, against the Rust crate single-threaded:
+
+| input | ours vs Rust |
+|---|---|
+| 128 B - 2 KiB | 1.52x - 1.68x slower |
+| 4 KiB - 16 KiB | **1.94x - 1.98x slower** |
+| 64 KiB and up | 0.48x - 0.55x, but we are using four cores and Rust one |
+
+**The ARM single-thread gap is about 2x, roughly double the 1.30x on x86**, so proportionally
+this is where the headroom is. It is also where the obvious gaps are: ARM has no two-chunk or
+three-to-four-chunk remainder kernel, so anything between the 4-way kernel and a single chunk
+falls back to per-chunk scalar compression, and 4-16 KiB is exactly the band that hurts most.
+The rows at 64 KiB and above are not a kernel comparison and should not be read as one.
 
 ## Test Framework
 
@@ -152,6 +166,67 @@ shutdown` does not release them.
 - **Regenerate the README chart from the same run as the table**, so they cannot drift:
   `python src/Blake3.Managed.Benchmarks/make_chart.py <bdn-output> img/benchmark.svg`
 
+### Where the remaining single-thread gap is (measured 2026-09-20)
+
+`perf stat` over 100,000 hashes of 64 KiB, single-threaded, tiering off, ours against the Rust
+`blake3` crate on the same machine in the same session. Two runs agreed to four significant
+figures, so unlike a wall-clock A/B these numbers are precise to about 0.1%:
+
+| metric | ours (AVX2 8-way) | Rust | ratio |
+|---|---|---|---|
+| wall time | 1.129 s | 0.871 s | 1.30x |
+| instructions | 15.73 B | 7.67 B | **2.05x** |
+| IPC | **2.81** | 1.77 | ours 1.59x better |
+| L1-dcache-load-misses | 120 M | 122 M | identical |
+
+**We execute about 2.1x the operations Rust does for the same work, at the same vector width.**
+Micro-op counts track instruction counts almost exactly on both sides (`ex_ret_ops` / instructions
+= 1.002 ours, 1.003 Rust), so neither side's hot loop is dominated by anything exotic; we simply
+issue twice as many operations. Per operation we are the more efficient of the two -- our IPC is
+59% higher and our cache behaviour is identical -- which is why this shows up as only a 1.3x wall
+-clock difference rather than 2.1x.
+
+**Going wider is a coin flip, not a win.** A 512-bit version of the round -- same structure,
+16 state vectors, register resident, no transpose and no memory traffic -- was timed against the
+256-bit version over the same bytes, nine alternating rounds per process, median reported, six
+processes per machine:
+
+| machine | fast mode | slow mode |
+|---|---|---|
+| Ryzen 7 8845HS, Linux | 1.030x, 1.032x, 1.030x | 0.571x, 0.585x, 0.683x |
+| Ryzen 7 PRO 7840U, Windows | 1.152x, 1.167x, 1.173x, 1.165x | 0.866x, 0.863x |
+
+The result is **bimodal, not noisy**: each process is internally stable to well under 1% and
+lands in one mode or the other, and it reproduces across two CPUs and two operating systems, so
+it is RyuJIT choosing a spilling or non-spilling allocation for `Vector512` rather than anything
+about the hardware.
+
+So the honest summary is: when the allocation goes well, 512-bit buys between nothing and 16%;
+when it does not, it costs 13-43%; and which one you get is not under your control. That is
+already a poor trade, and a real 16-way kernel would be strictly worse placed than this
+microbenchmark, because it must also hold a 16x16 transpose and sixteen message vectors -- the
+pressure that made the earlier attempt spill. Naive instruction counting suggests 512-bit should
+halve the work; it does not, because Zen 4 double-pumps, which is why even the good mode only
+reaches parity on one of the two machines.
+
+What is *not* established: exactly which kernel the Rust build dispatches to. Its binary contains
+AVX-512 code and the hot region references both `ymm16+` and `zmm`, but `ex_ret_ops` counts
+macro-ops on AMD and double-pumping happens below that level, so these counters cannot settle the
+width. Do not repeat the claim that it is 16-way; the useful fact is the 2.1x operation count,
+and that gap has to be closed at 256 bits.
+
+Two things this rules out for the mid-size band:
+
+- Nothing in the glue can close it. One `Hash(64 KiB)` costs 0.966 of eight `Hash(8 KiB)` calls
+  per byte, so wider inputs are if anything slightly *cheaper* and there is no tree-height
+  penalty to find.
+- Memory is not the problem. Cache misses already match the Rust implementation exactly, which is
+  why software prefetch has no mechanism to help (it was tried; see the dead ends).
+
+**Measure this band with `perf stat` instruction counts, not the A/B harness.** Instruction
+counts are reproducible to ~0.01% and cycles to ~0.1%, against a 3-5% noise floor for a
+wall-clock run, and every remaining candidate in this area is predicted well under 5%.
+
 ### Known dead ends
 
 - **Replacing the `stackalloc Vector256<uint>[16]` message array in `HashManyAvx2` with 16 named locals.**
@@ -172,6 +247,11 @@ shutdown` does not release them.
   thirty-one integer registers with no shuffles, while the NEON kernel re-diagonalises with EXT every
   round on a two-pipe 64-bit NEON unit. Vectorising pays in `HashManyNeon`, which keeps four chunks in
   four lanes and never diagonalises. Re-measure before trying this on a wider ARM core.
+- **Software prefetch of the next batch in the serial tree.** Tried 2026-09-20 with
+  `Sse.Prefetch0` over the following 8-chunk batch. No effect that the harness could resolve,
+  and there is no mechanism for one: L1 miss counts already match the Rust implementation
+  exactly, so there are no excess misses to remove. The run also illustrates the noise problem
+  -- it reported "IMPROVED 5.5%" at 1 KiB, a size where the prefetch loop cannot execute at all.
 - **`AdvSimd.ShiftRightAndInsert` (SRI) for the NEON Rot12/Rot7 rotates.** One instruction fewer than
   shift/shift/or, and **3-5% slower at every size from 4 KB up** on Cortex-A73: SRI's destination is
   also a source, so it serialises behind the shift feeding it, while the two shifts in the original

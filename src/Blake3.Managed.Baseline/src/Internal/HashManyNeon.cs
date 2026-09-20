@@ -21,6 +21,10 @@ internal static class HashManyNeon
         return AdvSimd.ReverseElement16(v.AsInt32()).AsUInt32();
     }
 
+    // Deliberately three ops rather than SRI. ShiftRightAndInsert is one instruction fewer,
+    // but its destination is also a source, so it serialises behind the shift feeding it,
+    // while the two shifts here are independent and dual-issue on the A73's two NEON pipes.
+    // Measured on a Cortex-A73 (2026-09-19): SRI was 3-5% slower at every size from 4 KB up.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<uint> RotateRight12(Vector128<uint> v)
     {

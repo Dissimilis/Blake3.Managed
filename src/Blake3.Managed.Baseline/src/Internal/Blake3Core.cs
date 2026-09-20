@@ -509,6 +509,24 @@ internal static class Blake3Core
                 blockCounter += (ulong)(batchBytes / 64);
             }
 
+            // 64 bytes short of a full batch, but more than one block left: run the same
+            // eight-lane kernel once into a scratch buffer and keep the prefix. The lanes
+            // differ only in the output counter, so a batch costs one compression's worth of
+            // latency whatever the block count, while the scalar loop below pays one
+            // compression per block. Two blocks is the break-even point -- a single leftover
+            // block is cheaper compressed directly than through a wasted eight-lane batch.
+            //
+            // Out of line, because the 512-byte scratch buffer would otherwise sit in this
+            // method's frame on every call, including the large-output path that never reaches
+            // this branch. Keeping it here measured 0.3% slower at 8 KB and 128 KB of output.
+            if (OutputManyAvx2.IsSupported && outputLen - pos >= 2 * Blake3Constants.BlockLen)
+            {
+                int take = outputLen - pos;
+                EmitPartialBatch(blockCounter, output.Slice(pos, take));
+                pos += take;
+                blockCounter += (ulong)(take / Blake3Constants.BlockLen);
+            }
+
             while (pos < outputLen)
             {
                 CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
@@ -522,6 +540,83 @@ internal static class Blake3Core
                 stateBytes.Slice(0, toCopy).CopyTo(output.Slice(pos));
                 pos += toCopy;
                 blockCounter++;
+            }
+        }
+
+        /// <summary>
+        /// Emits 2..7 root output blocks with one eight-lane batch, keeping the prefix the
+        /// caller asked for.
+        /// </summary>
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void EmitPartialBatch(ulong blockCounter, Span<byte> destination)
+        {
+            Span<byte> batch = stackalloc byte[512];
+            OutputManyAvx2.HashOutput(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                _flags, batch);
+            batch.Slice(0, destination.Length).CopyTo(destination);
+        }
+    }
+
+    /// <summary>
+    /// Fan-out for <see cref="HasherState.UpdateWithJoin"/>: items below
+    /// <c>subtrees</c> are whole 64-chunk subtrees reduced to one CV, the rest are
+    /// eight-chunk batches whose CVs are merged by the caller.
+    /// </summary>
+    private sealed unsafe class JoinJob : Blake3Tree.FlatJob
+    {
+        private readonly byte* _input;
+        private readonly uint* _key;
+        private readonly uint[] _cvBuffer;
+        private readonly ulong _startCounter;
+        private readonly uint _flags;
+        private readonly int _subtrees;
+
+        public JoinJob(int items, byte* input, uint* key, uint[] cvBuffer,
+            ulong startCounter, uint flags, int subtrees)
+            : base(items)
+        {
+            _input = input;
+            _key = key;
+            _cvBuffer = cvBuffer;
+            _startCounter = startCounter;
+            _flags = flags;
+            _subtrees = subtrees;
+        }
+
+        protected override void Process(int item)
+        {
+            const int chunkLen = Blake3Constants.ChunkLen;
+            const int subtreeChunks = 64;
+            const int subtreeLen = subtreeChunks * chunkLen;
+
+            var key = new ReadOnlySpan<uint>(_key, 8);
+
+            if (item < _subtrees)
+            {
+                byte* subtreeBase = _input + (long)item * subtreeLen;
+                ulong counter = _startCounter + (ulong)item * subtreeChunks;
+                Span<uint> cvs = stackalloc uint[subtreeChunks * 8];
+
+                for (int b = 0; b < subtreeChunks / 8; b++)
+                {
+                    HashManyAvx2.HashMany(
+                        new ReadOnlySpan<byte>(subtreeBase + b * 8 * chunkLen, 8 * chunkLen),
+                        8, key, counter + (ulong)(b * 8), _flags,
+                        cvs.Slice(b * 64, 64));
+                }
+
+                ReduceCvs(cvs, subtreeChunks, key, _flags);
+                cvs.Slice(0, 8).CopyTo(_cvBuffer.AsSpan(item * 8, 8));
+            }
+            else
+            {
+                int batch = item - _subtrees;
+                long offset = (long)_subtrees * subtreeLen + (long)batch * 8 * chunkLen;
+                HashManyAvx2.HashMany(
+                    new ReadOnlySpan<byte>(_input + offset, 8 * chunkLen),
+                    8, key, _startCounter + (ulong)(_subtrees * subtreeChunks + batch * 8),
+                    _flags, _cvBuffer.AsSpan(_subtrees * 8 + batch * 64, 64));
             }
         }
     }
@@ -903,7 +998,6 @@ internal static class Blake3Core
             // As in Update: new input means a deferred chunk is not the last one.
             if (_hasPendingCv) FlushPendingCv();
             const int subtreeChunks = 64;
-            const int subtreeLen = subtreeChunks * chunkLen;
 
             // The parallel path needs a 64-aligned chunk counter so each 64-chunk
             // subtree is canonical and can be reduced to a single CV by its worker.
@@ -944,41 +1038,13 @@ internal static class Blake3Core
             {
                 fixed (byte* inputBase = &Unsafe.AsRef(in MemoryMarshal.GetReference(input)))
                 {
-                    nint inputAddr = (nint)inputBase; // capture as nint; reconstruct inside lambda
-
-                    Parallel.For(0, items, item =>
-                    {
-                        unsafe
-                        {
-                            var key = new ReadOnlySpan<uint>((uint*)keyAddr, 8);
-                            if (item < subtreesLocal)
-                            {
-                                // Hash a whole 64-chunk subtree down to one CV; the
-                                // parent reduction happens here, inside the worker.
-                                byte* subtreeBase = (byte*)inputAddr + (long)item * subtreeLen;
-                                ulong counter = startCounter + (ulong)item * subtreeChunks;
-                                Span<uint> cvs = stackalloc uint[subtreeChunks * 8];
-                                for (int b = 0; b < subtreeChunks / 8; b++)
-                                {
-                                    HashManyAvx2.HashMany(
-                                        new ReadOnlySpan<byte>(subtreeBase + b * 8 * chunkLen, 8 * chunkLen),
-                                        8, key, counter + (ulong)(b * 8), flagsCopy,
-                                        cvs.Slice(b * 64, 64));
-                                }
-                                ReduceCvs(cvs, subtreeChunks, key, flagsCopy);
-                                cvs.Slice(0, 8).CopyTo(cvBuffer.AsSpan(item * 8, 8));
-                            }
-                            else
-                            {
-                                int batch = item - subtreesLocal;
-                                long offset = (long)subtreesLocal * subtreeLen + (long)batch * 8 * chunkLen;
-                                HashManyAvx2.HashMany(
-                                    new ReadOnlySpan<byte>((byte*)inputAddr + offset, 8 * chunkLen),
-                                    8, key, startCounter + (ulong)(subtreesLocal * subtreeChunks + batch * 8),
-                                    flagsCopy, cvBuffer.AsSpan(subtreesLocal * 8 + batch * 64, 64));
-                            }
-                        }
-                    });
+                    // The same flat fan-out the one-shot tree uses, rather than Parallel.For.
+                    // Parallel.For's replicating tasks wake the pool one hop at a time, which
+                    // measured 18-27% slower there; this path was simply never migrated with it.
+                    // RunOnPool returns only once every item has settled, so the pinned input
+                    // and the stack-allocated key stay valid for exactly as long as before.
+                    new JoinJob(items, inputBase, (uint*)keyAddr, cvBuffer, startCounter,
+                        flagsCopy, subtreesLocal).RunOnPool(Environment.ProcessorCount);
                 }
 
                 Span<uint> tempCv = stackalloc uint[8];
