@@ -58,7 +58,7 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Requires AVX-512 VL for the 32-register file; dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14).
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
-- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon` is reachable: the ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class).
+- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon.HashMany` is reachable, and only ever with `numChunks` of 4. The ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class). `HashManyNeon.HashMany8` has **no callers at all**: the 8-chunk loop in `Blake3Tree.HashChunks` is gated on `HashManyAvx2.IsSupported`, so ARM never enters it. That is not a deliberate choice like `CompressNeon` — it is untested, and wiring it in may help or may repeat the `CompressNeon` result. Measure before assuming either.
 - `HasherState.Update` hashes aligned power-of-two subtrees of 8-64 chunks in `HashAlignedSubtree` (own non-inlined method: inlining it changed the shared loop's register allocation and cost 4% at 8 KB) and reduces them with 8-way parents, including 3-7 parent tails in `ReduceCvs`. Per-chunk CV-stack merging costs seven scalar parent compressions per eight chunks; this measured 10-15% less time for `Update` at 64 KB-10 MB (2026-09-14). The lone 5-8 chunk batch keeps the original `HashMany`; `HashManySerial` there was 6.6% slower at 8 KB.
 - **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take. Its workers hash their subtrees with the interleaved `HashManySerial`, which is worth 7.5% at 1 MB and 9.3% at 10 MB (2026-09-20): a worker always holds whole eight-chunk batches, the shape interleaving was written for. That is why the same kernel loses 6.6% on the lone 5-8 chunk batch in `Update`, where the batch is partial -- the two cases look alike and are not.
 - **`VectorCompat.cs`** — Cross-TFM compatibility layer for vector load/store operations.
@@ -75,6 +75,14 @@ overload. CryptoHives' comparison calls the span overload, so keep both in perfo
 
 The serial tree skips frontier reduction for two-chunk inputs and compresses 32-byte roots directly
 into the destination on little-endian machines. Preserve the general Output path for XOF output.
+
+**The `HashAlgorithm` adapter is much slower than `Hasher.Hash`, and it is what third parties
+measure.** `Blake3HashAlgorithm.TryComputeHash` routes through `UpdateWithJoin`, which is
+incremental by construction: it cannot use `Blake3Tree`, and it only fans out above ~72 KiB
+against ~32 KiB for the one-shot. A rough local probe (2026-09-21, not a lab run) put the
+adapter at 1.35-1.6x the one-shot below 16 KiB and **2.4x at 64 KiB**, converging by 1 MiB.
+External comparisons that wrap every library as a `HashAlgorithm` therefore never exercise the
+path this project tunes. Building a benchmark for the adapters is the open item.
 
 ### ARM64
 
@@ -99,6 +107,11 @@ this is where the headroom is. It is also where the obvious gaps are: ARM has no
 three-to-four-chunk remainder kernel, so anything between the 4-way kernel and a single chunk
 falls back to per-chunk scalar compression, and 4-16 KiB is exactly the band that hurts most.
 The rows at 64 KiB and above are not a kernel comparison and should not be read as one.
+
+Two further structural gaps on this tier, both confirmed by call site rather than measured:
+the unreachable `HashManyNeon.HashMany8` noted above, and **parent compression, which is
+AVX2-only**. Every batched parent call goes to `HashManyAvx2.HashParents8`, so on ARM each
+internal tree node is a separate scalar compression. Both compound in the same 4-16 KiB band.
 
 ## Test Framework
 
