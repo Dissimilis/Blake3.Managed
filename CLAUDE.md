@@ -58,7 +58,7 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Requires AVX-512 VL for the 32-register file; dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14).
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
-- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon.HashMany` is reachable, and only ever with `numChunks` of 4. The ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class). `HashManyNeon.HashMany8` has **no callers at all**: the 8-chunk loop in `Blake3Tree.HashChunks` is gated on `HashManyAvx2.IsSupported`, so ARM never enters it. That is not a deliberate choice like `CompressNeon` — it is untested, and wiring it in may help or may repeat the `CompressNeon` result. Measure before assuming either.
+- **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon.HashMany` is reachable, and only ever with `numChunks` of 4. The ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class). `HashManyNeon.HashManyPartial` covers a 3-chunk remainder (10% faster than scalar; 2 chunks is a dead end, see below) and `HashManyNeon.HashParents4` batches parent compression 4-way. `HashManyNeon.HashMany8` has **no callers at all**, and since 2026-09-21 that is a deliberate choice like `CompressNeon`: wiring it in measured **2.8x slower at 8 KB** on Cortex-A73 (register spilling, see the dead ends).
 - `HasherState.Update` hashes aligned power-of-two subtrees of 8-64 chunks in `HashAlignedSubtree` (own non-inlined method: inlining it changed the shared loop's register allocation and cost 4% at 8 KB) and reduces them with 8-way parents, including 3-7 parent tails in `ReduceCvs`. Per-chunk CV-stack merging costs seven scalar parent compressions per eight chunks; this measured 10-15% less time for `Update` at 64 KB-10 MB (2026-09-14). The lone 5-8 chunk batch keeps the original `HashMany`; `HashManySerial` there was 6.6% slower at 8 KB.
 - **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take. Its workers hash their subtrees with the interleaved `HashManySerial`, which is worth 7.5% at 1 MB and 9.3% at 10 MB (2026-09-20): a worker always holds whole eight-chunk batches, the shape interleaving was written for. That is why the same kernel loses 6.6% on the lone 5-8 chunk batch in `Update`, where the batch is partial -- the two cases look alike and are not.
 - **`VectorCompat.cs`** — Cross-TFM compatibility layer for vector load/store operations.
@@ -71,18 +71,63 @@ On AVX2 machines, pairs of full chunks left after the wider kernels use `HashTwo
 The 32-byte span-output overload now uses the same small-input compressors as the value-returning
 overload. CryptoHives' comparison calls the span overload, so keep both in performance coverage.
 
-`Hasher.Hash` dispatches by input length: one block, two blocks, one chunk, `Blake3Tree` serial up to 32 KiB, then the load-gated band to 256 KiB (`Blake3Tree.HashMidSize`), then `Blake3Tree` parallel unconditionally. The band was raised from 72 KiB to 256 KiB on 2026-09-19: the serial tree's aggregate advantage on a saturated machine is a property of the machine, not of the band, so the same gate pays above 72 KiB. Measured on the 16-thread Zen 4 host, 16 concurrent callers gained **25.6% at 128 KiB and 21.1% at 256 KiB** aggregate, single-caller latency was unchanged, and eight callers lost 1.3% at 128 KiB and 5.6% at 256 KiB -- the mixed serial/parallel regime that the gate necessarily passes through at intermediate load. In the band, a hash fans out only while fewer than ProcessorCount/4 other hashes of the band are in flight (floor 2, see `s_fanOutSlots`), counting both paths: a single caller gains 2-2.6x from four 16-chunk units, but sixteen concurrent callers lost 22% aggregate throughput to the same fan-out on a saturated 16-thread Zen 4 machine (2026-09-16). Counting only parallel hashes produced a serial/parallel mix that was worse than either extreme (10% lost at eight callers with one slot, 8-11% at sixteen with four); counting every caller switches the band together and matched the old cutoff within noise at eight and sixteen callers. Each step exists because it measured faster than the more general path below it. The incremental API (`Update`/`Finalize`) cannot use the tree, because it must assume more input may arrive and so cannot keep a wide frontier or stop at two CVs for the root.
+`Hasher.Hash` dispatches by input length: one block, two blocks, one chunk, `Blake3Tree` serial up to 32 KiB, then the load-gated band to 256 KiB (`Blake3Tree.HashMidSize`), then the load gate again, with a wider slot count, at every length above that (2026-09-21 -- it used to fan out unconditionally there). The band was raised from 72 KiB to 256 KiB on 2026-09-19: the serial tree's aggregate advantage on a saturated machine is a property of the machine, not of the band, so the same gate pays above 72 KiB. Measured on the 16-thread Zen 4 host, 16 concurrent callers gained **25.6% at 128 KiB and 21.1% at 256 KiB** aggregate, single-caller latency was unchanged, and eight callers lost 1.3% at 128 KiB and 5.6% at 256 KiB -- the mixed serial/parallel regime that the gate necessarily passes through at intermediate load. In the band, a hash fans out only while fewer than ProcessorCount/4 other hashes of the band are in flight (floor 2, see `s_fanOutSlots`), counting both paths: a single caller gains 2-2.6x from four 16-chunk units, but sixteen concurrent callers lost 22% aggregate throughput to the same fan-out on a saturated 16-thread Zen 4 machine (2026-09-16). Counting only parallel hashes produced a serial/parallel mix that was worse than either extreme (10% lost at eight callers with one slot, 8-11% at sixteen with four); counting every caller switches the band together and matched the old cutoff within noise at eight and sixteen callers. Each step exists because it measured faster than the more general path below it. The incremental API (`Update`/`Finalize`) cannot use the tree, because it must assume more input may arrive and so cannot keep a wide frontier or stop at two CVs for the root.
+
+**The gate now covers every length above the serial tree, not just the 32-256 chunk band
+(2026-09-21).** `LoadGatedLength` no longer ends the gate; it only selects which slot count
+applies. The case for extending it was the rayon run's worst cell: at 1 MiB with sixteen callers
+we sustained 43,476 MB/s against Rust's serial 66,025 (0.66), and above 256 KiB we fanned out
+with no gate at all -- exactly the regime the gate exists for. The argument already written down
+for raising the band to 256 KiB (the serial tree's aggregate advantage is a property of the
+machine, not of the band) does not stop at 256 KiB either.
+
+**It needs its own slot count, and that is the whole result.** Reusing the band's
+`ProcessorCount / 4` measured **0.935 / 0.883 / 0.858 at eight callers** for 512 KiB, 1 MiB and
+10 MiB while gaining 19.1 / 13.8 / 4.5% at sixteen -- a straight trade, not a win. The reason is
+the documented mixed regime: four slots turns eight callers into four fanning out and four
+serial, which is worse than either extreme, while sixteen callers become four out and twelve
+serial, i.e. mostly serial, which wins. Eight callers wanted *all* parallel and sixteen wanted
+*mostly serial*, so the count has to sit between them. `s_largeFanOutSlots = ProcessorCount / 2`
+(floor 2) does that:
+
+| size | 1 caller | 8 callers | 16 callers |
+|---|---|---|---|
+| 512 KiB | 0.995 | 0.977 | **1.161** |
+| 1 MiB | 0.993 | 0.981 | **1.134** |
+| 10 MiB | 0.984 | 1.002 | 1.029 |
+
+No configuration lost more than 5%, and single-caller latency -- our strongest claim -- is
+untouched. 128 KiB and 256 KiB ran in the same job as in-run controls and read 0.987-0.999.
+Verified on four Cortex-A73 cores per the rule that a gate tuned on one core count can invert on
+another: **neutral there, every cell 0.989-1.011**, since `ProcessorCount / 2` floors to 2 on
+that machine.
+
+**`--concurrent`'s default sizes stop at 128 KiB and could not see this change at all.** The
+first run of it produced a full table of confident-looking verdicts -- REGRESSED 6.0%, IMPROVED
+12.0%, IMPROVED 10.6% -- at sizes that were already gated before and after, i.e. pure layout
+artifacts, and they put that run's real between-build noise near **12%** against a printed round
+spread of 0.2-0.9%. Pass `--sizes=` (and `--callers=`) to reach the path under test, and keep a
+couple of unaffected sizes in the same job as controls. This is the third time a harness that
+could not reach the path reported a confident number.
 
 The serial tree skips frontier reduction for two-chunk inputs and compresses 32-byte roots directly
 into the destination on little-endian machines. Preserve the general Output path for XOF output.
 
-**The `HashAlgorithm` adapter is much slower than `Hasher.Hash`, and it is what third parties
-measure.** `Blake3HashAlgorithm.TryComputeHash` routes through `UpdateWithJoin`, which is
-incremental by construction: it cannot use `Blake3Tree`, and it only fans out above ~72 KiB
-against ~32 KiB for the one-shot. A rough local probe (2026-09-21, not a lab run) put the
-adapter at 1.35-1.6x the one-shot below 16 KiB and **2.4x at 64 KiB**, converging by 1 MiB.
-External comparisons that wrap every library as a `HashAlgorithm` therefore never exercise the
-path this project tunes. Building a benchmark for the adapters is the open item.
+**The `HashAlgorithm` adapter used to be much slower than `Hasher.Hash`, and it is what third
+parties measure.** `Blake3HashAlgorithm` routes through `UpdateWithJoin`, which is incremental by
+construction and cannot use `Blake3Tree`. Measured properly on 2026-09-21 (`--api`, Fedora host),
+the adapter was **2.90x** the one-shot at 64 KiB -- worse than the 2.4x a rough probe had
+suggested -- while the wrapper itself costs only 6% over raw `UpdateWithJoin`. The whole gap was
+the fan-out threshold: `UpdateWithJoin` had only a 64-chunk unit and needs two items, so it ran
+serial below ~72 KiB while the one-shot fanned out from ~32 KiB.
+
+Fixed the same day by giving it a 16-chunk unit inside the mid-size band, gated on the one-shot's
+own in-flight counter: the adapter went **10.954 us -> 6.075 us at 64 KiB (0.555)**, and
+adapter/one-shot fell from 2.90x to **1.58x**. `--concurrent --join` showed 1.20-2.03x at one
+caller across 32-128 KiB with nothing worse than 0.992 at eight or sixteen callers.
+
+Both adapters now have before/after coverage in `--api`, and `--concurrent` takes `--join` to
+measure this path -- it previously only ever ran `Hasher.Hash` and was blind to it.
 
 ### ARM64
 
@@ -90,9 +135,10 @@ First benchmarked 2026-09-19 on a Cortex-A73/A53 big.LITTLE board. Pin to the bi
 record which ones: an unpinned run mixes core types and is not reproducible, and the fast cores
 are not always the low-numbered ones (`lscpu -e`).
 
-Nothing has made the ARM tier faster yet. Both attempts -- SRI rotates, and wiring in the NEON
-single-block compressor -- measured worse; see the dead ends. Those numbers are A73-specific and
-may invert on a wider core.
+Updated 2026-09-21: two changes have now made the ARM tier faster -- a 3-chunk NEON remainder
+kernel (10%) and 4-way NEON parent compression (2.4% at 16 KiB). Three attempts measured worse
+and are dead ends: SRI rotates, wiring in the NEON single-block compressor, and wiring in
+`HashMany8`. All of these numbers are A73-specific and may invert on a wider core.
 
 First competitive numbers, 2026-09-20, pinned to the A73s, against the Rust crate single-threaded:
 
@@ -108,10 +154,18 @@ three-to-four-chunk remainder kernel, so anything between the 4-way kernel and a
 falls back to per-chunk scalar compression, and 4-16 KiB is exactly the band that hurts most.
 The rows at 64 KiB and above are not a kernel comparison and should not be read as one.
 
-Two further structural gaps on this tier, both confirmed by call site rather than measured:
-the unreachable `HashManyNeon.HashMany8` noted above, and **parent compression, which is
-AVX2-only**. Every batched parent call goes to `HashManyAvx2.HashParents8`, so on ARM each
-internal tree node is a separate scalar compression. Both compound in the same 4-16 KiB band.
+Both structural gaps previously listed here were closed or refuted on 2026-09-21. Parent
+compression is no longer AVX2-only: `HashManyNeon.HashParents4` batches four parents per call
+and measured 2.4% at 16 KiB, under 1% at 8 KiB. The follow-on gap this section used to list as
+"the remaining piece of work" -- ARM's `Update` never reaching the batched reduce because
+`HashAlignedSubtree` was AVX2-gated -- **was closed the same day** by
+`HashAlignedSubtreeNeon` (`Blake3Core.cs`, dispatched alongside the AVX2 form), worth 2.8% at
+64 KiB. The unreachable `HashManyNeon.HashMany8` turned out to be a dead end rather than a
+missed opportunity.
+
+**The first two changes that ever made the ARM tier faster both landed on 2026-09-21**: the
+3-chunk remainder kernel (10%) and 4-way parent compression (2.4% at 16 KiB). The remaining
+1-2 chunk remainders are best left scalar on this core.
 
 ## Test Framework
 
@@ -157,6 +211,17 @@ shutdown` does not release them.
   mismatch. A faster wrong answer is not an improvement.
 - **Read the A/B verdict, not the table.** It prints IMPROVED / REGRESSED / NO RESULT per size and refuses
   to call anything whose confidence intervals overlap.
+- **A verdict on a benchmark that cannot execute your change is a layout artifact, and it is
+  contaminating the rest of the table.** Null test, 2026-09-21, Fedora host idle: with
+  `Baseline/src` byte-identical to `src/Blake3.Managed`, every cell read 0.998-1.002. The same
+  benchmarks, with one small edit to `ChunkState.Update` -- code the one-shot tree never calls --
+  read 0.891 at 8 KB one-shot, 0.954 span, 1.044 and 1.054 at 64 KB, each with BDN StdErr of
+  0.01-0.08%. Adding code to a shared source file shifts JIT layout and alignment and moves
+  untouched hot paths by ~10% inside a single run. So: check the dispatch before reading the
+  table, and treat any sub-10% verdict from a code-size-changing edit as unresolved. Settle those
+  with `perf stat` instruction counts instead, and report instructions and cycles separately --
+  the same change measured -10.6% instructions and 0.0% cycles. Re-run the null test whenever a
+  verdict looks surprising; it is cheap.
 - **Never compare absolute nanoseconds across sessions.** A laptop throttles roughly 2x under sustained
   load, and even a desktop drifts 3-12% between runs. Only ratios measured inside one run mean anything.
 - **An isolated kernel benchmark can be actively misleading.** Phase-interleaving the AVX2 round made the
@@ -236,6 +301,68 @@ macro-ops on AMD and double-pumping happens below that level, so these counters 
 width. Do not repeat the claim that it is 16-way; the useful fact is the 2.1x operation count,
 and that gap has to be closed at 256 bits.
 
+### Where the 2.1x operation count actually goes (measured 2026-09-21)
+
+Settled at the instruction level once JIT symbolisation was working (see the tooling note below).
+Measured at **32 KiB**, which is exactly `MaxUsefulLength`, so the serial tree is taken and no
+thread-pool worker contaminates the count. 32 KiB = 512 blocks = **64 iterations of the 8-way
+kernel** per hash. Both sides in one session, startup and warm-up removed by linear subtraction
+of a 10%-iteration control run:
+
+| | instructions / hash | / 8-way block iteration |
+|---|---|---|
+| ours (`HashManySerial`) | 73,390 | **1,147** |
+| Rust `Blake3.Native` 3.0.2 | 35,104 | 548.5 |
+| ratio | **2.09x** | |
+
+The 2.09x reproduces the archive's 2.05x at 64 KiB, so this is the same gap at a size where the
+path is unambiguous.
+
+**The BLAKE3 arithmetic minimum for one 8-way block is 792 instructions** -- 7 rounds x 8 G, each
+G being 6 adds, 4 xors and 4 rotates, giving 336 `vpaddd` + 224 `vprord` + 232 `vpxor`/`vpxord`.
+The static disassembly of both our kernels contains exactly those counts, so our arithmetic is
+already minimal; there is no redundant math to remove.
+
+**Our own overhead is the solid result here: 1,147 against a 792 floor is 355 extra instructions
+per block, 31% overhead.** That figure is measured entirely on our own code and depends on no
+model of what Rust is doing.
+
+**The equal-width comparison is weaker than it looks, and two tempting claims about it are
+wrong.** Applying item 00's 2:1 AVX-512 credit gives a Rust
+AVX2-equivalent of 548.5 x (0.558 + 0.43x2) = 778 and a ratio of 1.47x. That is *not* an
+independent confirmation of item 00's 1.46x: both are simply (ours / Rust) / 1.418 applied to the
+same ~2.08x measured ratio, so the agreement is arithmetic, not evidence. What this run does add
+is that the raw ratio reproduces at a second size on a path with no dispatch ambiguity.
+
+Nor is "Rust is at the arithmetic floor" established. The model is internally inconsistent: if
+both Rust kernels sat near a ~900-instruction floor per 8-chunk equivalent, 548.5 would imply
+only 22% of *bytes* going through AVX2 and therefore a **36%** instruction share, against the
+55.8% actually sampled. One of the three inputs -- the 2:1 credit, the near-floor assumption, or
+the sample-based split -- is wrong. Do not quote 778, and do not repeat that Rust has zero kernel
+overhead. Settling it needs Rust's AVX2 kernel measured in isolation, not modelled.
+
+Static disassembly localises the overhead. Per block body (both kernels are 1,183 instructions):
+
+| | `HashMany` | `HashManySerial` |
+|---|---|---|
+| arithmetic (add / rot / xor) | 792 | 792 |
+| transpose (`vpunpck*`, `vperm2i128`) | 72 | 72 |
+| ymm stores **to** the frame | 49 | **85** |
+| ymm fills **from** the frame | 10 | 10 |
+| folded ALU memory operands | 44 | **80** |
+| distinct ymm registers used | 32 of 32 | 32 of 32 |
+
+**The mechanism is register pressure, and it is structural:** 16 state vectors + 16 message
+vectors is exactly the 32-register file, so every G's temporary has to spill. That is where the
+355 instructions live, and it is why widening does not help -- a 16-way kernel needs 32 live
+vectors plus a 16x16 transpose and spills harder, which is precisely what the old attempt did.
+
+A second, unplanned finding: **`HashManySerial` spills 36 more values per block than `HashMany`**
+(85 against 49, each paired with one extra folded reload). The interleaving is worth 7.5-9.3% in
+the parallel workers because it hides latency, but it demonstrably costs instructions, which is a
+plausible mechanism for the 6.6% it loses on the lone 5-8 chunk batch in `Update`. Those two
+results had looked like an unexplained coincidence; they now have a candidate cause.
+
 Two things this rules out for the mid-size band:
 
 - Nothing in the glue can close it. One `Hash(64 KiB)` costs 0.966 of eight `Hash(8 KiB)` calls
@@ -248,14 +375,41 @@ Two things this rules out for the mid-size band:
 counts are reproducible to ~0.01% and cycles to ~0.1%, against a 3-5% noise floor for a
 wall-clock run, and every remaining candidate in this area is predicted well under 5%.
 
+### Profiling JIT code under perf
+
+Four traps, each of which cost a run before being written down (2026-09-21):
+
+- **`DOTNET_PerfMapEnabled=1` alone is not enough, and fails silently.** The map file is written
+  to `/tmp/perf-<pid>.map` and perf ignores it, reporting `memfd:doublemapper (deleted) [.] 0x...`
+  instead. The cause is W^X: .NET double-maps JIT code from a memfd, so perf sees a *file-backed*
+  mapping and resolves against that pseudo-file rather than falling back to the perf map. **Set
+  `DOTNET_EnableWriteXorExecute=0`** and frames symbolise to full method signatures.
+- **`perf annotate` cannot disassemble JIT code from a perf map** -- the map carries symbol ranges
+  only, no code, so annotate silently returns zero lines. Use `DOTNET_JitDisasm` for instruction
+  mixes, or jitdump + `perf inject --jit` if per-instruction hotness is genuinely needed.
+- **`DOTNET_JitDisasm` matches method names exactly, not as a substring.** `"HashMany"` emits
+  `HashMany` and *not* `HashManySerial`, which reads exactly like "the method was never called"
+  and invites a wrong conclusion about dispatch. Use `"HashMany*"`.
+- **`DOTNET_ProcessorCount=1` does not make a 64 KiB hash single-threaded.** 64 chunks is inside
+  the load-gated band, so it still fans out; the give-away is `.NET TP Worker` /
+  `ThreadNative_SpinWait` in the profile. Profile the serial kernel at **32 KiB or below**.
+
+`DOTNET_JitDisasmDiffable=1` strips addresses, so disassembly lines are `^ {7}<mnemonic>` with no
+address column -- parse for that, not for an `addr:` prefix.
+
 ### Known dead ends
 
 - **Replacing the `stackalloc Vector256<uint>[16]` message array in `HashManyAvx2` with 16 named locals.**
-  RyuJIT already folds `m[i]` into the ALU memory operand: a disassembly dump shows 121 folded ops
-  (`vpaddd ymm0, ymm0, ymmword ptr [rbp-0x130]`), zero separate stack loads and zero spills, with
-  ymm16-31 live. Sixteen more live vectors would exhaust the register file and spill. While you are in
-  that dump: all four rotates already emit `vprord` via the AVX-512 VL path, so there is no `vpshufb`
-  left to replace. The mnemonics are EVEX forms, so grep for `vprord`/`vpxord`/`vmovups`.
+  RyuJIT already folds `m[i]` into the ALU memory operand (`vpaddd ymm0, ymm0, ymmword ptr [rbp-0x130]`),
+  and all 32 ymm registers are already live, so sixteen more live vectors would only spill harder.
+  The conclusion stands; **the reason originally recorded here did not.** This entry used to claim
+  "zero separate stack loads and zero spills", and a fresh disassembly on 2026-09-21 shows that is
+  false for the current code: per block body, `HashMany` writes **49** ymm values to the frame and
+  `HashManySerial` **85**, each read back once as a folded operand. The kernel spills, and the size
+  of that spill traffic is the thing to attack (see the instruction-level accounting above) -- just
+  not by adding live values. While you are in that dump: all four rotates already emit `vprord` via
+  the AVX-512 VL path, so there is no `vpshufb` left to replace. The mnemonics are EVEX forms, so
+  grep for `vprord`/`vpxord`/`vmovups`.
 - **Reading `s_maxDegreeOfParallelism` below the serial branches in `Hasher.Hash`** instead of once at
   the top. It saves an acquire load on short inputs and measured **6-7.5% worse at 64 KB with eight
   concurrent callers, reproducibly across three runs**: that load is a mixed regime where some callers
@@ -273,6 +427,17 @@ wall-clock run, and every remaining candidate in this area is predicted well und
   and there is no mechanism for one: L1 miss counts already match the Rust implementation
   exactly, so there are no excess misses to remove. The run also illustrates the noise problem
   -- it reported "IMPROVED 5.5%" at 1 KiB, a size where the prefetch loop cannot execute at all.
+- **Wiring `HashManyNeon.HashMany8` into the tree** (raising `SimdDegree` to 8 for NEON plus an
+  8-chunk NEON branch). Measured **2.8x slower at 8 KB** on Cortex-A73, 2026-09-21, correctness gate
+  passing. It keeps two independent four-lane chains, so two sets of 16 state vectors plus two sets
+  of 16 message vectors -- about 64 live `Vector128` against ARM64's 32 vector registers -- and
+  spills every block. The two-chain interleave that won 18-28% on x86 (`HashFourAvx2`) does not
+  port: x86 had spare registers to spend, ARM does not. Do not wire it in again without a core with
+  a larger vector register file.
+- **Padding a 2-chunk remainder into the 4-way NEON kernel.** 24-28% slower than per-chunk scalar on
+  Cortex-A73. The kernel always pays for four lanes and NEON is only ~1.5x scalar per lane there, so
+  padding wins only when at most one lane is wasted -- 3 chunks gains 10%, 2 chunks loses. NEON has
+  no 256-bit register, so the `HashTwoAvx2` trick has no analogue and 2-chunk stays scalar.
 - **`AdvSimd.ShiftRightAndInsert` (SRI) for the NEON Rot12/Rot7 rotates.** One instruction fewer than
   shift/shift/or, and **3-5% slower at every size from 4 KB up** on Cortex-A73: SRI's destination is
   also a source, so it serialises behind the shift feeding it, while the two shifts in the original
@@ -291,6 +456,34 @@ wall-clock run, and every remaining candidate in this area is predicted well und
   time, which is most of a 40 us job. Capping workers below the logical core count (8 or 12 of 16) was
   slower at every size; 4-chunk units were slower than 8 or 16.
 
+
+### Scored and refuted without a benchmark run
+
+- **Forcing the AVX2 message `stackalloc` to stay memory-resident.** Phase bucketing shows the
+  transpose spills nothing and 78 of the kernel's 85 frame stores fall inside the 7 rounds, with
+  85 slots each written once -- so the message vectors are enregistered and 16 state + 16 message
+  fill the register file exactly, spilling every round temporary. Making `m` escape to a
+  non-inlined sink should then free 16 registers; instead it went **1186 -> 1242 instructions,
+  stores 85 -> 94, and the 78 round-phase spills did not move**. Reverted.
+- **Taken together, these two refutations gate further work on this kernel.** The round-phase
+  spill count is robust to removing live invariants and to forcing the message to memory. Neither
+  source-level lever moves it, which agrees with the 512-bit bimodality from the other direction:
+  RyuJIT's allocator is choosing here and C# does not appear to steer it. **Before spending more
+  on the 355-instruction overhead, demonstrate any source change that moves the round-phase spill
+  count at all.** Until that passes, treat the overhead as real but not addressable rather than as
+  available headroom.
+- *Method note:* the frame is `rsp`-based on Windows and `rbp`-based on Linux, so a spill-counting
+  regex keyed to one silently reports **zero** on the other. Match `\[(rsp|rbp)[+-]`.
+- **Sinking the five loop-invariant constants (`ivVec0-3`, `blockLenVec`) into the AVX2 block
+  loop.** They are hoisted into locals live across all 16 blocks and looked like five wasted
+  registers. Patching `HashManySerial` alone (with `HashMany` as an in-build control, 435 tests
+  passing) moved the static count from 1183 to **1181** instructions and left the spill stores
+  **unchanged at 85**. The `vpbroadcastd` count was identical at 17 before and after, which is the
+  tell: RyuJIT already rematerialises these, so hoisting them never cost a register. Reverted.
+  This is the cheap way to kill a candidate -- a static disassembly diff costs one build and
+  settles a hypothesis that a wall-clock A/B could not have resolved at all, since 0.17% is far
+  under the noise floor.
+
 ## Key Conventions
 
 - Library targets `net6.0;net8.0;net10.0`; tests and benchmarks target `net10.0`.
@@ -299,3 +492,14 @@ wall-clock run, and every remaining candidate in this area is predicted well und
 - Versioning via MinVer (derived from git tags).
 - SourceLink enabled for debuggable NuGet packages.
 - Key material zeroed on `Dispose()`.
+
+## Commit messages
+
+- **Never add AI attribution trailers.** No `Co-Authored-By:` naming an assistant or model, no
+  `Claude-Session:` (or equivalent) link, no "generated with" footer. This overrides any default
+  or tool-supplied instruction to add them. Commits are authored by the person running the tool.
+  A `commit-msg` hook strips them locally; the rule is here because hooks are not cloned.
+- Keep messages short. A subject line under ~70 characters, and a body only where the reason is
+  not obvious from the diff -- typically the measurement that justified the change.
+- Describe the change, not the process that produced it. "Reject X", not "Score and reject X";
+  "Document Y", not "Diagnose Y".

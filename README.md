@@ -13,7 +13,7 @@ One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAK
 ## Features
 
 - **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
-- **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out above ~72 KiB on AVX2 hardware
+- **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out from ~32 KiB too on AVX2 hardware, under the same back-off
 - **Split hashing** - hash pieces independently and combine them into the whole-input digest with `Blake3SubtreeContext`
 - **Zero allocation** for small inputs with `Hasher.Hash()`
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
@@ -94,7 +94,7 @@ xof.Finalize(1_000_000, later);        // read from any offset in the output str
 
 ```csharp
 using var parallel = Hasher.New();
-parallel.UpdateWithJoin(largeData); // uses thread pool above ~72 KiB
+parallel.UpdateWithJoin(largeData); // uses thread pool from ~32 KiB
 var parallelHash = parallel.Finalize();
 ```
 

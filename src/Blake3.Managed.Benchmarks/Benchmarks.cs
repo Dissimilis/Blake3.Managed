@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using BenchmarkDotNet.Attributes;
 using ManagedHasher = Blake3.Managed.Hasher;
 using BaselineHasher = Baseline::Blake3.Managed.Hasher;
+using BaselineHashAlgorithm = Baseline::Blake3.Managed.Blake3HashAlgorithm;
+using BaselineStream = Baseline::Blake3.Managed.Blake3Stream;
 using NativeHasher = Blake3.Hasher;
 using XoofxHasher = XoofxManaged::Blake3.Hasher;
 using CryptoHivesBlake3 = CryptoHives.Foundation.Security.Cryptography.Hash.Blake3;
@@ -412,16 +414,23 @@ public class ApiSurfaceBenchmarks
     [Params(1_024, 65_536, 1_048_576, 10_485_760)]
     public int Data_Size;
 
+    private BaselineHashAlgorithm _baselineHashAlgorithm = null!;
+
     [GlobalSetup]
     public void Setup()
     {
         _data = new byte[Data_Size];
         new Random(2).NextBytes(_data);
         _hashAlgorithm = new Blake3HashAlgorithm();
+        _baselineHashAlgorithm = new BaselineHashAlgorithm();
     }
 
     [GlobalCleanup]
-    public void Cleanup() => _hashAlgorithm.Dispose();
+    public void Cleanup()
+    {
+        _hashAlgorithm.Dispose();
+        _baselineHashAlgorithm.Dispose();
+    }
 
     [Benchmark(Baseline = true, Description = "Hasher.Hash one-shot")]
     public byte OneShot() => ManagedHasher.Hash(_data).AsSpan()[0];
@@ -462,6 +471,38 @@ public class ApiSurfaceBenchmarks
     {
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(_data, hash);
+        return hash[0];
+    }
+
+    // Before/after pairs for the two adapters. The decision harness covers UpdateWithJoin, which
+    // is the path underneath them, but not the wrappers themselves: ComputeHash allocates a
+    // 32-byte array per call, goes through virtual dispatch and re-Initializes. That overhead is
+    // invisible at 1 MB and dominates at 1 KB, and this adapter is what external comparisons
+    // measure, so it needs its own verdict. Named Before*/After* so PrintAbVerdicts pairs them.
+
+    [Benchmark(Description = "before: Blake3HashAlgorithm.ComputeHash")]
+    public byte BeforeAdapter() => _baselineHashAlgorithm.ComputeHash(_data)[0];
+
+    [Benchmark(Description = "after:  Blake3HashAlgorithm.ComputeHash")]
+    public byte AfterAdapter() => _hashAlgorithm.ComputeHash(_data)[0];
+
+    [Benchmark(Description = "before: Blake3Stream")]
+    public byte BeforeStream()
+    {
+        using var stream = new BaselineStream(Stream.Null);
+        stream.Write(_data, 0, _data.Length);
+        Span<byte> hash = stackalloc byte[32];
+        stream.ComputeHash(hash);
+        return hash[0];
+    }
+
+    [Benchmark(Description = "after:  Blake3Stream")]
+    public byte AfterStream()
+    {
+        using var stream = new Blake3Stream(Stream.Null);
+        stream.Write(_data, 0, _data.Length);
+        Span<byte> hash = stackalloc byte[32];
+        stream.ComputeHash(hash);
         return hash[0];
     }
 }

@@ -457,4 +457,330 @@ internal static class HashManyNeon
         VectorCompat.Store(o3, ref outRef, 24);
         VectorCompat.Store(o7, ref outRef, 28);
     }
+
+    /// <summary>
+    /// Three complete chunks through the 4-way NEON kernel, with the spare lane pointed at chunk
+    /// zero so the batch stays inside the input span. ARM otherwise drops from the 4-way kernel
+    /// straight to per-chunk scalar compression for this remainder.
+    /// <para>
+    /// Callers should pass only <c>numChunks == 3</c>. The kernel accepts 2 as well, but two
+    /// chunks measured 24-28% SLOWER than the scalar path on Cortex-A73 (2026-09-21): the kernel
+    /// always pays for four lanes, and NEON is only about 1.5x scalar per lane on that core, so
+    /// padding pays off only when at most one lane is wasted.
+    /// </para>
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashManyPartial(ReadOnlySpan<byte> chunks, int numChunks,
+                                       ReadOnlySpan<uint> key, ulong startCounter,
+                                       uint flags, Span<uint> cvs)
+    {
+        const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
+
+        // Unused lanes reread chunk zero, keeping partial batches inside the input span.
+        // All four CVs are computed; only numChunks of them are written out.
+        int offset1 = numChunks > 1 ? 1 * Blake3Constants.ChunkLen : 0;
+        int offset2 = numChunks > 2 ? 2 * Blake3Constants.ChunkLen : 0;
+        int offset3 = numChunks > 3 ? 3 * Blake3Constants.ChunkLen : 0;
+
+        Vector128<uint> cv0 = Vector128.Create(key[0]);
+        Vector128<uint> cv1 = Vector128.Create(key[1]);
+        Vector128<uint> cv2 = Vector128.Create(key[2]);
+        Vector128<uint> cv3 = Vector128.Create(key[3]);
+        Vector128<uint> cv4 = Vector128.Create(key[4]);
+        Vector128<uint> cv5 = Vector128.Create(key[5]);
+        Vector128<uint> cv6 = Vector128.Create(key[6]);
+        Vector128<uint> cv7 = Vector128.Create(key[7]);
+
+        var counterLo = Vector128.Create(
+            (uint)(startCounter + 0), (uint)(startCounter + 1),
+            (uint)(startCounter + 2), (uint)(startCounter + 3));
+        var counterHi = Vector128.Create(
+            (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
+            (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32));
+
+        var ivVec0 = Vector128.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector128.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector128.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector128.Create(Blake3Constants.Iv3);
+        var blockLenVec = Vector128.Create((uint)Blake3Constants.BlockLen);
+
+        fixed (byte* chunksPtr = chunks)
+        {
+            Vector128<uint>* m = stackalloc Vector128<uint>[16];
+
+            for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
+            {
+                byte* blockBase = chunksPtr + blockIdx * 64;
+
+                // Load 4 words (16 bytes) from each of 4 chunks, then transpose
+                // Lower 8 words (0-7): two groups of 4
+                var r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen);
+                var r1 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset1);
+                var r2 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset2);
+                var r3 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset3);
+                Transpose4X4(r0, r1, r2, r3, out m[0], out m[1], out m[2], out m[3]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 16);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset1 + 16);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset2 + 16);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset3 + 16);
+                Transpose4X4(r0, r1, r2, r3, out m[4], out m[5], out m[6], out m[7]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 32);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset1 + 32);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset2 + 32);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset3 + 32);
+                Transpose4X4(r0, r1, r2, r3, out m[8], out m[9], out m[10], out m[11]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 48);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset1 + 48);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset2 + 48);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + offset3 + 48);
+                Transpose4X4(r0, r1, r2, r3, out m[12], out m[13], out m[14], out m[15]);
+
+                // Block flags
+                uint blockFlags = flags;
+                if (blockIdx == 0) blockFlags |= Blake3Constants.ChunkStart;
+                if (blockIdx == blocksPerChunk - 1) blockFlags |= Blake3Constants.ChunkEnd;
+                var flagsVec = Vector128.Create(blockFlags);
+
+                Vector128<uint> s0 = cv0, s1 = cv1, s2 = cv2, s3 = cv3;
+                Vector128<uint> s4 = cv4, s5 = cv5, s6 = cv6, s7 = cv7;
+                Vector128<uint> s8 = ivVec0, s9 = ivVec1, s10 = ivVec2, s11 = ivVec3;
+                Vector128<uint> s12 = counterLo, s13 = counterHi;
+                Vector128<uint> s14 = blockLenVec, s15 = flagsVec;
+
+                // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+                G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
+                G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
+                G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
+                G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
+                G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
+                G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
+                G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
+                G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
+                G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
+                G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
+                G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
+                G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
+                G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
+                G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+
+                // Post-XOR: only chaining value (first 8 words)
+                cv0 = AdvSimd.Xor(s0, s8);
+                cv1 = AdvSimd.Xor(s1, s9);
+                cv2 = AdvSimd.Xor(s2, s10);
+                cv3 = AdvSimd.Xor(s3, s11);
+                cv4 = AdvSimd.Xor(s4, s12);
+                cv5 = AdvSimd.Xor(s5, s13);
+                cv6 = AdvSimd.Xor(s6, s14);
+                cv7 = AdvSimd.Xor(s7, s15);
+            }
+        }
+
+        // 4x4 transpose: word-major to chunk-major for output
+        Transpose4X4(cv0, cv1, cv2, cv3, out var o0, out var o1, out var o2, out var o3);
+        Transpose4X4(cv4, cv5, cv6, cv7, out var o4, out var o5, out var o6, out var o7);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(o0, ref outRef);
+        VectorCompat.Store(o4, ref outRef, 4);
+        if (numChunks > 1)
+        {
+            VectorCompat.Store(o1, ref outRef, 8);
+            VectorCompat.Store(o5, ref outRef, 12);
+        }
+        if (numChunks > 2)
+        {
+            VectorCompat.Store(o2, ref outRef, 16);
+            VectorCompat.Store(o6, ref outRef, 20);
+        }
+        if (numChunks > 3)
+        {
+            VectorCompat.Store(o3, ref outRef, 24);
+            VectorCompat.Store(o7, ref outRef, 28);
+        }
+    }
+
+    /// <summary>
+    /// Four parent nodes compressed together in the four NEON lanes. Each parent block is 64
+    /// bytes (two child chaining values). Without this every internal tree node on ARM is a
+    /// separate scalar compression; the AVX2 tier has had <c>HashParents8</c> from the start.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashParents4(ReadOnlySpan<uint> parentBlocks,
+                                           ReadOnlySpan<uint> key, uint flags,
+                                           Span<uint> cvs)
+    {
+        fixed (uint* inPtr = parentBlocks)
+        {
+            byte* basePtr = (byte*)inPtr;
+            Vector128<uint>* m = stackalloc Vector128<uint>[16];
+
+            // Four parent blocks, stride 64 bytes, transposed block-major -> word-major.
+            for (int g = 0; g < 4; g++)
+            {
+                var r0 = Unsafe.ReadUnaligned<Vector128<uint>>(basePtr + 0 * 64 + g * 16);
+                var r1 = Unsafe.ReadUnaligned<Vector128<uint>>(basePtr + 1 * 64 + g * 16);
+                var r2 = Unsafe.ReadUnaligned<Vector128<uint>>(basePtr + 2 * 64 + g * 16);
+                var r3 = Unsafe.ReadUnaligned<Vector128<uint>>(basePtr + 3 * 64 + g * 16);
+                Transpose4X4(r0, r1, r2, r3, out m[g * 4 + 0], out m[g * 4 + 1],
+                             out m[g * 4 + 2], out m[g * 4 + 3]);
+            }
+
+            // Parent nodes always start from the key, counter 0, a full 64-byte block.
+            Vector128<uint> s0 = Vector128.Create(key[0]);
+            Vector128<uint> s1 = Vector128.Create(key[1]);
+            Vector128<uint> s2 = Vector128.Create(key[2]);
+            Vector128<uint> s3 = Vector128.Create(key[3]);
+            Vector128<uint> s4 = Vector128.Create(key[4]);
+            Vector128<uint> s5 = Vector128.Create(key[5]);
+            Vector128<uint> s6 = Vector128.Create(key[6]);
+            Vector128<uint> s7 = Vector128.Create(key[7]);
+            Vector128<uint> s8 = Vector128.Create(Blake3Constants.Iv0);
+            Vector128<uint> s9 = Vector128.Create(Blake3Constants.Iv1);
+            Vector128<uint> s10 = Vector128.Create(Blake3Constants.Iv2);
+            Vector128<uint> s11 = Vector128.Create(Blake3Constants.Iv3);
+            Vector128<uint> s12 = Vector128<uint>.Zero;
+            Vector128<uint> s13 = Vector128<uint>.Zero;
+            Vector128<uint> s14 = Vector128.Create((uint)Blake3Constants.BlockLen);
+            Vector128<uint> s15 = Vector128.Create(flags | Blake3Constants.Parent);
+
+            // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+            G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+            // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
+            G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+            // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
+            G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+            // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
+            G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+            // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
+            G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+            // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
+            G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+            // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
+            G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
+            G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
+            G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
+            G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
+            G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
+            G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
+            G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
+            G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+
+            var cv0 = AdvSimd.Xor(s0, s8);
+            var cv1 = AdvSimd.Xor(s1, s9);
+            var cv2 = AdvSimd.Xor(s2, s10);
+            var cv3 = AdvSimd.Xor(s3, s11);
+            var cv4 = AdvSimd.Xor(s4, s12);
+            var cv5 = AdvSimd.Xor(s5, s13);
+            var cv6 = AdvSimd.Xor(s6, s14);
+            var cv7 = AdvSimd.Xor(s7, s15);
+
+            Transpose4X4(cv0, cv1, cv2, cv3, out var o0, out var o1, out var o2, out var o3);
+            Transpose4X4(cv4, cv5, cv6, cv7, out var o4, out var o5, out var o6, out var o7);
+
+            ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+            VectorCompat.Store(o0, ref outRef);
+            VectorCompat.Store(o4, ref outRef, 4);
+            VectorCompat.Store(o1, ref outRef, 8);
+            VectorCompat.Store(o5, ref outRef, 12);
+            VectorCompat.Store(o2, ref outRef, 16);
+            VectorCompat.Store(o6, ref outRef, 20);
+            VectorCompat.Store(o3, ref outRef, 24);
+            VectorCompat.Store(o7, ref outRef, 28);
+        }
+    }
 }

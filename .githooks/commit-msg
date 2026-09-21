@@ -1,0 +1,22 @@
+#!/bin/sh
+# Strip AI attribution trailers from commit messages.
+#
+# Assistants are frequently instructed by their own tooling to append these.
+# The project rule (CLAUDE.md, "Commit messages") is that commits are authored
+# by the person running the tool, so remove them rather than rely on the
+# assistant obeying. Silent by design: this should be invisible in normal use.
+#
+# Enabled per clone with:  git config core.hooksPath .githooks
+
+msg="$1"
+[ -f "$msg" ] || exit 0
+
+tmp="$msg.stripped"
+grep -viE '^[[:space:]]*(co-authored-by:[[:space:]]*(claude|gpt|codex|copilot|gemini|assistant)|claude-session:|generated with \[?claude|🤖 generated with)' \
+  "$msg" > "$tmp" || true
+
+# Drop trailing blank lines left behind by the removal.
+awk 'BEGIN{n=0} {lines[NR]=$0} END{last=NR; while(last>0 && lines[last]~/^[[:space:]]*$/) last--; for(i=1;i<=last;i++) print lines[i]}' \
+  "$tmp" > "$msg"
+rm -f "$tmp"
+exit 0

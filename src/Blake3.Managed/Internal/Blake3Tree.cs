@@ -83,23 +83,61 @@ internal static class Blake3Tree
     /// </remarks>
     private static readonly int s_fanOutSlots = Math.Max(2, Environment.ProcessorCount / 4);
 
+    /// <summary>
+    /// Slots for lengths above <see cref="LoadGatedLength"/>.
+    /// </summary>
+    /// <remarks>
+    /// Wider than <see cref="s_fanOutSlots"/>, and it has to be. That count comes from an input
+    /// in the band splitting into four units; above the band a 1 MiB input splits into far more,
+    /// so reusing four leaves eight callers in the mixed regime -- four fanning out, four serial
+    /// -- and measured 0.935 / 0.883 / 0.858 at 512 KiB, 1 MiB and 10 MiB, while sixteen callers
+    /// ended up mostly serial and gained 19.1 / 13.8 / 4.5%. Eight callers want every hash
+    /// parallel and sixteen want most of them serial, so the count belongs between the two.
+    /// At <c>ProcessorCount / 2</c>, on a 16-thread Zen 4 host: 1.161 at 512 KiB and 1.134 at
+    /// 1 MiB with sixteen callers, 1.029 at 10 MiB, eight callers 0.977-1.002, single callers
+    /// 0.984-0.995, nothing losing more than 5%. Neutral on four Cortex-A73 cores (0.989-1.011),
+    /// where the floor of 2 applies.
+    /// </remarks>
+    private static readonly int s_largeFanOutSlots = Math.Max(2, Environment.ProcessorCount / 2);
+
     private static int s_midSizeInFlight;
 
     /// <summary>
     /// Whether a one-shot hash of <paramref name="length"/> bytes needs the load-gated
     /// dispatch in <see cref="HashMidSize"/> rather than the serial tree.
     /// </summary>
+    /// <remarks>
+    /// Every length above the serial tree's range is gated, not just the 32-256 chunk band;
+    /// <see cref="LoadGatedLength"/> now only selects which slot count applies. Lengths above it
+    /// used to fan out unconditionally, and that was the worst cell measured against the Rust
+    /// crate: 43,476 MB/s at 1 MiB with sixteen callers against its serial 66,025. The reason
+    /// the gate pays -- the serial tree sustaining more aggregate throughput once every core is
+    /// busy -- is a property of the machine, not of the band, so it does not stop at 256 KiB.
+    /// </remarks>
     internal static bool IsMidSize(int length) =>
-        length > MaxUsefulLength && length <= LoadGatedLength;
+        length > MaxUsefulLength;
 
     /// <summary>
     /// Hashes a mid-size input (see <see cref="IsMidSize"/>) with the thread-pool tree while the
     /// process is lightly loaded and with the serial tree otherwise.
     /// </summary>
+    /// <summary>
+    /// Number of concurrent mid-size hashes allowed to fan out. Shared with
+    /// <see cref="Blake3Core.HasherState.UpdateWithJoin"/>: the band must switch together, and
+    /// counting only one of the two paths produced a mixed regime worse than either extreme.
+    /// </summary>
+    internal static int FanOutSlots => s_fanOutSlots;
+
+    /// <summary>Registers a mid-size hash and returns how many others were already in flight.</summary>
+    internal static int EnterMidSize() => Interlocked.Increment(ref s_midSizeInFlight) - 1;
+
+    /// <summary>Deregisters a hash registered by <see cref="EnterMidSize"/>.</summary>
+    internal static void LeaveMidSize() => Interlocked.Decrement(ref s_midSizeInFlight);
+
     internal static void HashMidSize(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key, uint flags,
         Span<byte> output, int maxDegreeOfParallelism)
     {
-        int others = Interlocked.Increment(ref s_midSizeInFlight) - 1;
+        int others = EnterMidSize();
         try
         {
             // One fixed slot count for the whole band, not one derived from the input size.
@@ -109,7 +147,7 @@ internal static class Blake3Tree
             // where the formula produces exactly this value. Eight callers at that size is a
             // mixed regime where some fan out and some do not, and it is sensitive to how long
             // each caller holds the counter, so the arithmetic is not free. Left as measured.
-            int slots = s_fanOutSlots;
+            int slots = input.Length <= LoadGatedLength ? s_fanOutSlots : s_largeFanOutSlots;
 
             if (others < slots)
             {
@@ -122,7 +160,7 @@ internal static class Blake3Tree
         }
         finally
         {
-            Interlocked.Decrement(ref s_midSizeInFlight);
+            LeaveMidSize();
         }
     }
 
@@ -447,6 +485,14 @@ internal static class Blake3Tree
                 HashManyAvx2.HashParents8(scratch, key, parentFlags, outCvs.Slice(p * 8, 64));
             }
         }
+        else if (HashManyNeon.IsSupported)
+        {
+            for (; p + 4 <= numParents; p += 4)
+            {
+                cvs.Slice(p * 16, 64).CopyTo(scratch);
+                HashManyNeon.HashParents4(scratch, key, parentFlags, outCvs.Slice(p * 8, 32));
+            }
+        }
 
         for (; p < numParents; p++)
         {
@@ -688,6 +734,19 @@ internal static class Blake3Tree
             n += 4;
         }
 
+        // Exactly three whole chunks on ARM: the 4-way NEON kernel with the spare lane pointed at
+        // chunk zero. Three is the only remainder worth padding -- measured on Cortex-A73,
+        // three chunks gain 10% over per-chunk scalar while two lose 24-28%, because the kernel
+        // always pays for four lanes and NEON here is only ~1.5x scalar per lane.
+        if (HashManyNeon.IsSupported && remaining.Length >= chunkLen * 3)
+        {
+            HashManyNeon.HashManyPartial(remaining, 3, key, counter, flags,
+                cvs.Slice(n * 8, 24));
+            remaining = remaining.Slice(3 * chunkLen);
+            counter += 3;
+            n += 3;
+        }
+
         if (HashTwoAvx2.IsSupported && remaining.Length >= chunkLen * 2)
         {
             HashTwoAvx2.HashTwo(remaining, key, counter, flags, cvs.Slice(n * 8, 16));
@@ -773,6 +832,14 @@ internal static class Blake3Tree
                 HashManyAvx2.HashParents8(children.Slice(p * 16, 128), key, parentFlags,
                     outCvs.Slice(p * 8, 64));
                 p = numParents;
+            }
+        }
+        else if (HashManyNeon.IsSupported)
+        {
+            for (; p + 4 <= numParents; p += 4)
+            {
+                HashManyNeon.HashParents4(children.Slice(p * 16, 64), key, parentFlags,
+                    outCvs.Slice(p * 8, 32));
             }
         }
 

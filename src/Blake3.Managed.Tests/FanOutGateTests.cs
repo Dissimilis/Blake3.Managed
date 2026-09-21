@@ -102,12 +102,19 @@ public class FanOutGateTests
     }
 
     [Fact]
-    public void IsMidSize_CoversExactlyTheGatedBand()
+    public void IsMidSize_GatesEveryLengthAboveTheSerialTree()
     {
+        // The serial tree's own range is never gated.
         Assert.False(Blake3Tree.IsMidSize(Blake3Tree.MaxUsefulLength));
+
+        // Everything above it is, including above LoadGatedLength. That upper bound used to
+        // end the gate; it now only selects which slot count applies, because leaving lengths
+        // above it to fan out unconditionally measured 0.66 of Rust's serial path at 1 MiB
+        // with sixteen callers -- the worst cell in the 2026-09-21 rayon table.
         Assert.True(Blake3Tree.IsMidSize(Blake3Tree.MaxUsefulLength + 1));
         Assert.True(Blake3Tree.IsMidSize(Blake3Tree.LoadGatedLength));
-        Assert.False(Blake3Tree.IsMidSize(Blake3Tree.LoadGatedLength + 1));
+        Assert.True(Blake3Tree.IsMidSize(Blake3Tree.LoadGatedLength + 1));
+        Assert.True(Blake3Tree.IsMidSize(int.MaxValue));
     }
 
     [Fact]

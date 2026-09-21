@@ -32,6 +32,12 @@ internal static class ConcurrentThroughput
         int rounds = ParseList(args, "--rounds=", new[] { 7 })[0];
         int roundMs = ParseList(args, "--round-ms=", new[] { 400 })[0];
 
+        // --join measures UpdateWithJoin instead of Hash. That is the path Blake3HashAlgorithm
+        // and Blake3Stream take, and it has its own fan-out and its own gate, so a change to it
+        // is invisible to the default one-shot workload here.
+        bool join = args.Contains("--join", StringComparer.OrdinalIgnoreCase);
+
+        Console.WriteLine($"Workload: {(join ? "UpdateWithJoin (adapter path)" : "Hasher.Hash (one-shot)")}");
         Console.WriteLine($"Concurrent-caller throughput: {rounds} alternating rounds of {roundMs} ms per side, median reported.");
         Console.WriteLine($"Logical CPUs: {Environment.ProcessorCount}. Ratio is after/before on MB/s; above 1.00 is an improvement.");
         Console.WriteLine();
@@ -50,15 +56,15 @@ internal static class ConcurrentThroughput
                 // order of a second of steady calls to reach Tier1 with PGO; a shorter warm-up
                 // measured Tier0 code and produced a spurious 25% "regression" on the workstation.
                 int warmMs = Math.Max(roundMs, 1000);
-                Measure(size, n, warmMs, baseline: true);
-                Measure(size, n, warmMs, baseline: false);
+                Measure(size, n, warmMs, baseline: true, join);
+                Measure(size, n, warmMs, baseline: false, join);
 
                 for (int r = 0; r < rounds; r++)
                 {
                     // Swap order every round so neither side always runs on the hotter package.
                     bool baselineFirst = (r & 1) == 0;
-                    before.Add(Measure(size, n, roundMs, baseline: baselineFirst));
-                    after.Add(Measure(size, n, roundMs, baseline: !baselineFirst));
+                    before.Add(Measure(size, n, roundMs, baseline: baselineFirst, join));
+                    after.Add(Measure(size, n, roundMs, baseline: !baselineFirst, join));
                     if (!baselineFirst) (before[^1], after[^1]) = (after[^1], before[^1]);
                 }
 
@@ -101,7 +107,7 @@ internal static class ConcurrentThroughput
     /// the hasher's own fan-out uses the pool, and the callers must compete with it the way
     /// request threads in a server would, not share its queue.
     /// </summary>
-    private static double Measure(int size, int callers, int ms, bool baseline)
+    private static double Measure(int size, int callers, int ms, bool baseline, bool join)
     {
         var buffers = new byte[callers][];
         for (int i = 0; i < callers; i++)
@@ -127,8 +133,33 @@ internal static class ConcurrentThroughput
                 Span<byte> hash = stackalloc byte[32];
                 while (stop.ElapsedTicks < deadlineTicks)
                 {
-                    if (baseline) BaselineHasher.Hash(data, hash);
-                    else ManagedHasher.Hash(data, hash);
+                    if (join)
+                    {
+                        // A fresh hasher per iteration, as the adapters effectively do: the
+                        // fan-out decision depends on the chunk counter being aligned, which a
+                        // reused hasher would not reproduce.
+                        if (baseline)
+                        {
+                            using var h = BaselineHasher.New();
+                            h.UpdateWithJoin(data);
+                            h.Finalize(hash);
+                        }
+                        else
+                        {
+                            using var h = ManagedHasher.New();
+                            h.UpdateWithJoin(data);
+                            h.Finalize(hash);
+                        }
+                    }
+                    else if (baseline)
+                    {
+                        BaselineHasher.Hash(data, hash);
+                    }
+                    else
+                    {
+                        ManagedHasher.Hash(data, hash);
+                    }
+
                     sink ^= hash[0];
                     bytes += data.Length;
                 }
