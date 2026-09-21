@@ -64,7 +64,24 @@ internal static class Blake3Tree
     /// </remarks>
     internal const int LoadGatedLength = 256 * Blake3Constants.ChunkLen;
 
-    private static readonly int s_fanOutSlots = Math.Max(1, Environment.ProcessorCount / 4);
+    /// <summary>
+    /// How many hashes of this band may fan out at once before the rest take the serial tree.
+    /// </summary>
+    /// <remarks>
+    /// <c>ProcessorCount / 4</c> because an input in this band splits into four units, so that
+    /// many concurrent callers are enough to keep every core busy. The floor is 2, not 1, and
+    /// the difference is not cosmetic: with one slot the *second* caller closes the gate for
+    /// everyone, and on a machine small enough for the division to reach 1 that leaves cores
+    /// idle rather than protecting a busy machine. Measured on four Cortex-A73 cores at 64 KiB,
+    /// aggregate went 1,009 MB/s at one caller, **554 at two**, 1,106 at four -- a second caller
+    /// nearly halving throughput, with two of the four cores doing nothing.
+    ///
+    /// The division is still right where it came from. Sixteen logical CPUs is eight physical
+    /// cores with SMT, so eight concurrent serial callers already saturate the machine and four
+    /// slots is the measured optimum there; the floor does not change that value and cannot
+    /// disturb it.
+    /// </remarks>
+    private static readonly int s_fanOutSlots = Math.Max(2, Environment.ProcessorCount / 4);
 
     private static int s_midSizeInFlight;
 
