@@ -67,10 +67,21 @@ internal static class RayonComparison
                 var samples = new Dictionary<Contender, List<double>>();
                 foreach (var c in contenders) samples[c] = new List<double>(rounds);
 
+                // Allocated once per cell, not per measurement: at the top cell the per-call
+                // version churned several GB of fresh pages per session. The fill is outside
+                // every timed window, but the GC and page-cache pressure it created was not.
+                // Sharing them also means every contender hashes exactly the same bytes.
+                var buffers = new byte[n][];
+                for (int i = 0; i < n; i++)
+                {
+                    buffers[i] = new byte[size];
+                    new Random(1000 + i).NextBytes(buffers[i]);
+                }
+
                 // Warm every contender before recording. Tiered compilation needs ~1 s of steady
                 // calls to reach Tier1 with PGO; a shorter warm-up has produced spurious verdicts.
                 int warmMs = Math.Max(roundMs, 1000);
-                foreach (var c in contenders) Measure(size, n, warmMs, c);
+                foreach (var c in contenders) Measure(buffers, warmMs, c);
 
                 for (int r = 0; r < rounds; r++)
                 {
@@ -78,7 +89,7 @@ internal static class RayonComparison
                     for (int i = 0; i < contenders.Length; i++)
                     {
                         var c = contenders[(i + r) % contenders.Length];
-                        samples[c].Add(Measure(size, n, roundMs, c));
+                        samples[c].Add(Measure(buffers, roundMs, c));
                     }
                 }
 
@@ -115,15 +126,9 @@ internal static class RayonComparison
     /// fan-outs use their own worker pools and the callers must compete with them the way request
     /// threads in a server would, not share their queues.
     /// </summary>
-    private static double Measure(int size, int callers, int ms, Contender contender)
+    private static double Measure(byte[][] buffers, int ms, Contender contender)
     {
-        var buffers = new byte[callers][];
-        for (int i = 0; i < callers; i++)
-        {
-            buffers[i] = new byte[size];
-            new Random(1000 + i).NextBytes(buffers[i]);
-        }
-
+        int callers = buffers.Length;
         long totalBytes = 0;
         using var start = new ManualResetEventSlim(false);
         var stop = new Stopwatch();
@@ -201,11 +206,21 @@ internal static class RayonComparison
         var arg = args.FirstOrDefault(a => a.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
         if (arg is null) return fallback;
 
-        var parsed = arg.Substring(prefix.Length)
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(int.Parse)
-            .ToArray();
+        var fields = arg.Substring(prefix.Length)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        return parsed.Length == 0 ? fallback : parsed;
+        var parsed = new List<int>(fields.Length);
+        foreach (var field in fields)
+        {
+            if (!int.TryParse(field, out int value) || value <= 0)
+            {
+                Console.WriteLine($"Ignoring '{field}' in {prefix}: expected a positive integer.");
+                continue;
+            }
+
+            parsed.Add(value);
+        }
+
+        return parsed.Count == 0 ? fallback : parsed.ToArray();
     }
 }
