@@ -59,13 +59,16 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
 - **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon.HashMany` is reachable, and only ever with `numChunks` of 4. The ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class). `HashManyNeon.HashManyPartial` covers a 3-chunk remainder (10% faster than scalar; 2 chunks is a dead end, see below) and `HashManyNeon.HashParents4` batches parent compression 4-way. `HashManyNeon.HashMany8` has **no callers at all**, and since 2026-09-21 that is a deliberate choice like `CompressNeon`: wiring it in measured **2.8x slower at 8 KB** on Cortex-A73 (register spilling, see the dead ends).
+- **`HashManySve2.cs`** (net10.0 only) — the `HashManyNeon` kernels with every xor-then-rotate fused into one SVE2 `XAR`, plus `HashMany8`, two 4-chunk batches interleaved per half-round and written out statement by statement. Reached only when `Sve2.IsSupported`: `HashManyNeon`'s entry points forward to it, `Blake3Tree` uses an SVE2 `SimdDegree` of 8, an 8-way loop and 2-chunk padding in `HashChunks`, and `HashAlignedSubtreeNeon` hands off to `HashAlignedSubtreeSve2`. Every one of those sites was placed so the NEON and x86 code compiles **identically** -- see "SVE2" under ARM64.
+- **`HashManyAvx512.cs`** (net8.0+) — `HashMany16` (sixteen chunks per call, fully expanded, spill-free: message, CVs and counters live in a 64-byte-aligned scratch area) and `HashOutput16` (sixteen XOF blocks per call). Reached from `CompressSubtreeWide` (any exact 16-chunk subtree -> `CompressSubtree16`), `HashAlignedSubtree` (-> `HashAlignedSubtreeAvx512`), the `UpdateWithJoin` workers and `RootOutputBytesAt` (-> `RootOutputBytesAtAvx512`). Its transpose helper is `NoInlining | AggressiveOptimization` on purpose -- see the tier-0 trap in the x86 round.
+- **`OutputManySve2.cs`** (net10.0 only) — eight XOF root blocks per call on SVE2, forwarded to from the top of `Output.RootOutputBytesAt` (`RootOutputBytesAtSve2`).
 - `HasherState.Update` hashes aligned power-of-two subtrees of 8-64 chunks in `HashAlignedSubtree` (own non-inlined method: inlining it changed the shared loop's register allocation and cost 4% at 8 KB) and reduces them with 8-way parents, including 3-7 parent tails in `ReduceCvs`. Per-chunk CV-stack merging costs seven scalar parent compressions per eight chunks; this measured 10-15% less time for `Update` at 64 KB-10 MB (2026-09-14). The lone 5-8 chunk batch keeps the original `HashMany`; `HashManySerial` there was 6.6% slower at 8 KB.
 - **`Blake3Tree.cs`** — All-at-once tree for inputs of known length: wide CV frontier, batched parent hashing, and the balanced thread-pool fan-out used by `Hasher.Hash`. `FlatJob` is the shared fan-out primitive: workers queued up front with `ThreadPool.UnsafeQueueUserWorkItem`, claiming units through one atomic counter. `HasherState.UpdateWithJoin` uses it too (via `Blake3Core.JoinJob`); it was still on `Parallel.For` until 2026-09-19, which measured 4-8.5% slower at 73 KiB-10 MB on the path `Blake3HashAlgorithm` and `Blake3Stream` actually take. Its workers hash their subtrees with the interleaved `HashManySerial`, which is worth 7.5% at 1 MB and 9.3% at 10 MB (2026-09-20): a worker always holds whole eight-chunk batches, the shape interleaving was written for. That is why the same kernel loses 6.6% on the lone 5-8 chunk batch in `Update`, where the batch is partial -- the two cases look alike and are not.
 - **`VectorCompat.cs`** — Cross-TFM compatibility layer for vector load/store operations.
 
 ### Hardware Intrinsics Tiering
 
-Runtime CPU detection dispatches: AVX2 (8-way parallel) > SSE/SSSE3 4-way > SSE/SSSE3 (vectorized single-lane) > Scalar (portable fallback). Opportunistic AVX-512 VL rotate instructions used when available.
+Runtime CPU detection dispatches: AVX2 (8-way parallel) > SSE/SSSE3 4-way > SSE/SSSE3 (vectorized single-lane) > Scalar (portable fallback). Opportunistic AVX-512 VL rotate instructions used when available. On ARM64: SVE2 (XAR, 8-way as two interleaved 4-way batches, net10.0+) > NEON 4-way > scalar single-block.
 
 On AVX2 machines, pairs of full chunks left after the wider kernels use `HashTwoAvx2`.
 The 32-byte span-output overload now uses the same small-input compressors as the value-returning
@@ -166,6 +169,225 @@ missed opportunity.
 **The first two changes that ever made the ARM tier faster both landed on 2026-09-21**: the
 3-chunk remainder kernel (10%) and 4-way parent compression (2.4% at 16 KiB). The remaining
 1-2 chunk remainders are best left scalar on this core.
+
+### SVE2 (Graviton4, 2026-09-23)
+
+First measured on an EC2 c8g.large: Graviton4, Neoverse-V2, 2 vCPU (two physical cores, no
+SMT), 128-bit SVE vectors, .NET 10.0.12. **.NET 10 already supports SVE2** -- `Sve2.IsSupported`
+is true and `Sve2.XorRotateRight` JITs to a real `xar`; .NET 11 is not needed. The API is
+`[Experimental]` (SYSLIB5003), suppressed in `HashManySve2.cs` only.
+
+In-process A/B against the frozen baseline, pinned to one core unless noted, paired medians:
+
+| API | 2-6 KiB | 8-32 KiB | 64 KiB-10 MiB |
+|---|---|---|---|
+| `Hasher.Hash` | 0.60-0.63 | **0.48-0.49** (12 KiB 0.55) | 0.49-0.51 (2 cores, parallel) |
+| `Update` | 0.64-0.65 | 0.57-0.64 | **0.49-0.51** |
+
+1 KiB and smaller are untouched (single-chunk path, scalar compressor): 0.97-1.00. The BDN
+adaptive A/B agreed, every reachable cell IMPROVED: one-shot 0.625 / 0.488 / 0.509 / 0.487 and
+`Update` 0.648 / 0.644 / 0.511 / 0.493 at 4 KiB / 8 KiB / 64 KiB / 1 MiB, with the 1 KiB controls
+at 1.001 and 0.996.
+
+**Against the Rust crate (`Blake3.Native`, serial) on the same Graviton4, `--competitive`:**
+one-shot 0.81 at 4 KiB and 0.62 at 16 KiB (both single-threaded, serial tree); `Update`, always
+single-threaded, 0.89 / 0.78 / 0.67 / 0.63 / 0.64 at 4 KiB / 16 KiB / 64 KiB / 1 MiB / 10 MiB. So
+on this core we are faster than Rust single-threaded from 4 KiB up. The one-shot rows from 64 KiB
+(0.32-0.35) use both cores against Rust's one and are not a kernel comparison. The remaining gap
+is the single-chunk path: **1.28x slower than Rust at 1 KiB** (scalar compressor), where SHA-256
+with the hardware SHA2 extension is fastest of all (0.72).
+
+The three changes, each measured separately in an out-of-tree kernel lab first:
+
+1. **`XAR` for all four rotates** -- a G step goes from 18 NEON ops to 10. 4-way kernel 0.675 of
+   NEON, 31% fewer instructions. Fusing only the 12/7 rotates (0.718) or 12/8/7 (0.702) was worse.
+2. **`(a + m) + b` instead of `(a + b) + m`** -- 0.866 on top of (1). The kernel is
+   latency-bound: timings fit an XAR latency of about 4 cycles against 2 for an add, so a G is a
+   ~28-cycle chain and four of them only half-fill V2's four vector pipes. `b` is always the
+   newest value (it leaves the previous XAR), so adding the message word to `a` first takes one
+   add off the chain, twice per G. **Untested on NEON**; the same argument applies there.
+3. **Two independent 4-chunk batches interleaved per half-round** (`HashMany8`) -- 0.791 of two
+   4-way calls; interleaving per G was 0.899. It spills (32 state vectors) but still wins.
+   `SimdDegree` is 8 on SVE2 so tree leaves are 8 chunks.
+
+Plus two-chunk padding: the XAR kernel does four chunks in 0.75 of the scalar time for two, so on
+SVE2 `HashChunks` pads a 2-chunk remainder into it (2 KiB one-shot 0.60). `Update` does not: see
+below.
+
+Things that were tried and did not help: a per-round store to stop the JIT hoisting the message
+loads (the 4-way kernel spills ~95 values per block, yet this measured 0.680 vs 0.675 -- the
+spills are off the critical path); loading messages via `AdvSimd.LoadVector128` (no change);
+`DOTNET_JitNoCSE` (not honoured by the release JIT). Not tried: an XAR single-block compressor for
+inputs under 1 KiB -- one XAR chain per half-round is ~330 cycles a block by the same latency
+model, no better than the scalar path's measured ~312.
+
+**"Without harming other CPUs" was verified as identical machine code, not as a timing.** For
+every method touched, `DOTNET_JitDisasm` + `DOTNET_JitDisasmDiffable=1` + `DOTNET_TieredCompilation=0`
+listings of the baseline and current builds were compared method by method (comment lines
+excluded): on the Cortex-A73, and on x86 at the AVX-512, SSE (`DOTNET_EnableAVX2=0`) and scalar
+(`DOTNET_EnableHWIntrinsic=0`) tiers. All identical. **Correction:** this also listed
+`DOTNET_EnableAVX512F=0` as an AVX2-only tier, but .NET 10 ignores that knob -- the one that
+works is `DOTNET_EnableAVX512=0` (checked with `Avx512F.IsSupported`). The AVX2-only tier was
+re-checked with the right knob later the same day; see the x86 round. Getting there took five
+placements, because **code the JIT removes as dead can still change the code around it**:
+
+- a non-constant chunk count in the NEON 3-chunk block of `Update` (dead on x86) added a 16-byte
+  stack slot and a per-chunk zero-init to x86's `Update`;
+- a ternary choosing the SVE2 subtree helper at the same call site did the same;
+- an SVE2 block placed right after the SSE 4-way loop in `HashChunks` changed that loop's layout on
+  x86, as did an `else if` on the NEON 3-chunk block;
+- an `if/else` around the NEON loop in `HashAlignedSubtreeNeon`, or forwarding from the top of it,
+  changed the A73 loop layout.
+
+What stayed identical: forwarding at the very top of a kernel (`HashManyNeon.*`), a separate
+`#if` block at the top of `HashChunks` or after the `HashTwoAvx2` block, the `SimdDegree` ternary,
+and an early return placed *after* the sizing loop in `HashAlignedSubtreeNeon`. The instruction
+differences were a few per call in every failed placement -- well under any timing noise floor --
+which is exactly why a wall-clock A/B could never have caught them. `Update` therefore still
+hashes a 2-chunk tail with scalar code on SVE2; every placement tried there changed x86.
+
+**The JIT's inlining budget is a real limit for these kernels.** A 112-call G helper in an
+8-chunk kernel ran out of budget partway through: the rest became real calls and the kernel ran
+**5.6x slower**, with the disassembly showing 36 calls passing vectors in split `d` registers.
+Expanded statement by statement it was the 0.791 above. A conditional inside the lab's G helper
+did the same to every variant. When a wide kernel is inexplicably several times slower, count
+the calls in its disassembly before blaming register pressure. This also reopens the
+`HashManyNeon.HashMany8` dead end below: it was attributed to spilling, but it is built from the
+same nested helpers (`DoColumnStep` -> `G128P` -> rotate helpers) and has not been checked for
+calls.
+
+Two NEON leads from the same lab, measured on V2 only, not applied (out of scope, and NEON changes
+must be measured on the A73): the per-round barrier store made the NEON 4-way kernel **9% faster**
+on V2, and SRI rotates were 5.7% faster on V2 where they are 3-5% slower on the A73.
+
+### Beating Rust across the range on Graviton4 (round 2, 2026-09-23)
+
+Mapped with an in-process harness (Rust `Blake3.Native` / frozen baseline / current, alternating
+per round, pinned to one core). After round 1 we already won from 2 KiB up; the losses were all
+small inputs, the incremental API and XOF. What fixed them:
+
+- **Scalar compressor rewritten** (`CompressScalar`, the single-block path on every ARM64 CPU):
+  rounds generated with constant message indices after one up-front bounds check, `(a + m) + b`,
+  a chaining-value variant that writes 8 words directly instead of compressing into a 16-word
+  scratch and copying, and each half-round **emitted step by step across its four independent
+  G's**. Per 1 KiB chunk: 0.837 of the old code without the interleaving, **0.761** with it.
+  RyuJIT does not schedule instructions, so source order is emission order. The same
+  interleaving did nothing for the SVE2 vector kernels (0.994 for 4-way, 1.02 for 8-way): the
+  scalar G chain is much shorter, so neighbouring independent work matters more there.
+  **On the Cortex-A73 this is 0.60-0.65 of the old time at every size up to 2 KiB**, taking it
+  from 1.3-1.7x slower than Rust to 0.86-1.01x. It is shared code, and it is a win everywhere it
+  runs.
+- **SVE2 XOF kernel** (`OutputManySve2.HashOutput8`, eight root blocks per call, two
+  interleaved 4-lane batches, fully expanded). ARM previously produced output one scalar block
+  at a time, as the Rust crate's ARM build still does: 1 KiB of output from a 64 B input is now
+  **0.38 of Rust**, 4 KiB 0.30, 64 KiB 0.28. Two blocks stay scalar -- the batch cost more than
+  a second scalar block -- so the batch starts at three.
+- **Incremental API fixed costs**, which dominated 64 B `Update` (3.1x Rust at the start):
+  `HasherState` is initialised in place (`Initialize` + `Unsafe.SkipInit`) instead of built as a
+  temporary and copied, which removed a 1.9 KB memset and memcpy per `Hasher`;
+  `TryUpdateWithinChunk` sends input that fits the current chunk straight to `ChunkState`,
+  skipping `HasherState.Update`'s 2 KiB-stackalloc frame (291 -> 262 ns at 64 B); `Dispose`
+  clears only the key, the chunk state and the stack slots that can have been used
+  (bitlength of the chunk count + 1), not all 1.9 KB (229 -> 215 ns); and `Finalize` into a
+  32-byte span compresses the root CV straight into it, as the one-shot path already did
+  (215 -> 203 ns).
+
+In-process on Graviton4 afterwards, ours / Rust: one-shot 0.82-0.98 from 1 B to 1.5 KiB (only
+the empty input is behind, 1.05), 0.53-0.76 at 2-3 KiB and ~0.5-0.6 from there; `Update` 1.01 at
+1-2 KiB; XOF of 256 B and more well ahead. **Still behind: tiny incremental use** -- 64 B
+`Update`, keyed or 64-128 B XOF at 1.28-1.35x. What is left there is .NET struct semantics for
+a ~1.9 KB `Hasher` (the CV stack is 54 x 32 B): the caller's own zero-init of its local, and a
+full memcpy out of `New()` that survived every factory shape tried (inlined, `NoInlining`,
+returning a `SkipInit` local). Closing it needs a smaller struct, i.e. a heap-allocated
+overflow stack for deep inputs -- an allocation-policy decision, not taken.
+
+BDN `--competitive` on Graviton4 afterwards (one-shot / Rust, `Update` / Rust; the one-shot uses
+both cores from 64 KiB, so those rows are not a kernel comparison):
+
+| size | one-shot | `Update` |
+|---|---|---|
+| 4 B | **0.87** | 2.05 |
+| 128 B | **0.89** | 1.52 |
+| 1 KiB | **0.97** | 1.06 |
+| 2 KiB | **0.76** | 1.04 |
+| 4 KiB | **0.79** | **0.84** |
+| 16 KiB | **0.62** | **0.75** |
+| 64 KiB | 0.35 | **0.66** |
+| 1 MiB | 0.32 | **0.63** |
+
+**Measuring the incremental API in-process needs `DOTNET_TC_CallCountingDelayMs=0`.** Without
+it the harness kept `HasherState`'s constructor and getters in tier-0 code indefinitely --
+New+Dispose read 243 ns against 42 ns fully optimised, and the baseline's 1 KiB `Update` moved
+from 1,917 to 2,313 ns. The call-counting delay restarts whenever new tier-0 code is jitted, and
+a harness that alternates many delegates keeps it restarting. BDN, one benchmark per process,
+does not show this.
+
+## x86 round, 2026-09-23 (Fedora host, Ryzen 7 8845HS / Zen 4)
+
+Mapped with the same in-process three-way harness as the SVE2 rounds (Rust `Blake3.Native` /
+frozen baseline / current, pinned to CPU 2, `DOTNET_TC_CallCountingDelayMs=0`). On Zen 4 the Rust
+crate uses its 16-way AVX-512 kernel, so this is the hardest comparison we have.
+
+**1. The tier-0 helper trap -- and a 16-way AVX-512 kernel that works.** A fully expanded 16-way
+`Vector512` kernel was fast in some processes (0.85 of two `HashManySerial` calls) and 1.6-2.0x
+slower in others. Not spills: a variant with zero stack `zmm` references was just as bimodal. Not
+alignment: hand-aligning the message buffer changed nothing. Tiering: fast in every process with
+`DOTNET_TieredCompilation=0` or `DOTNET_TC_QuickJit=0`, still bimodal with `DOTNET_TieredPGO=0`.
+The kernel's IL is too big for the inliner, so its `AggressiveInlining` transpose helper was a
+real call, and the helper sat in **tier-0 code** in unlucky processes. Marked
+`NoInlining | AggressiveOptimization`, it is compiled optimized up front, and the kernel ran at
+**0.73-0.86 in 4/4 processes** under default tiering. That kernel, spill-free (message, CVs and
+counters in a 64-byte-aligned scratch area, read as memory operands), step-interleaved and with
+`(a + m) + b`, ships as `HashManyAvx512`, plus a 16-block XOF kernel.
+
+**Rule: after writing any big kernel, check its disassembly for calls to managed helpers, and give
+every one `NoInlining | AggressiveOptimization` (or expand it).** When a kernel is "bimodal across
+processes", suspect this before register allocation. The audit found the shipped x86 kernels
+clean (`CompressSse41.DoRoundsShuffle` is already `AggressiveOptimization`); the tree functions
+(`CompressSubtreeWide`, `HashChunks`, `CompressParents`) are ordinary tiered methods and remain an
+unverified suspect for occasional huge outliers on the AVX2-only tier (one baseline 8 KiB reading
+of 18,281 ns against ~3,000).
+
+**2. `(a + m) + b` in the AVX2 8-way and XOF kernels**: 0.92-0.94 on 8-32 KiB one-shot, 0.88-0.91
+`Update` at 64 KiB, 0.925 XOF 64 KiB (before AVX-512 was wired in). **Not in the SSE 4-way
+kernel:** on the AVX2-only tier (4 KiB goes through it) it cost 6-7% (1.062-1.071 in three
+runs), and reverting it restored 1.001-1.005. `CompressSse41` already had the message first.
+
+**3. Shared ARM-round changes on x86**: the incremental API fixes give 0.70-0.72 at 64 B
+`Update`/keyed/XOF, 0.90 at 1 KiB.
+
+Afterwards, current / Rust on the AVX-512 tier: one-shot **0.73-0.95 up to 512 B**, 1.00 at 1 KiB,
+1.08-1.10 at 1025-1536 B, 1.01 at 2 KiB, 0.61-0.93 at 3-6 KiB, 1.07 at 8 KiB, **1.04-1.06 at
+16-32 KiB** (was 1.2-1.4), parallel 0.14-0.42; `Update` 1.09-1.11 at 1-10 MiB (was 1.35), 1.27
+at 64 KiB, 1.55 at 16 KiB; XOF 1.05 at 64 KiB (was 1.42); 64 B incremental still ~2.1x (the struct
+cost, see the SVE2 round 2). Against the baseline the AVX-512 work is 0.69-0.80 from 16 KiB up.
+
+BDN adaptive A/B on the same host (correctness gate passed): one-shot **0.803 / 0.801 / 0.822** at
+16 KiB / 64 KiB / 1 MiB, `Update` **0.927 / 0.953 / 0.825 / 0.799** at 1 KiB / 4 KiB / 64 KiB /
+1 MiB; one-shot 1 KiB and 4 KiB and `Update` 16 KiB NO RESULT (0.94-1.00). No regressions.
+
+**4. `Update` may now let an aligned subtree consume the whole input** (`FinishAlignedSubtree`,
+after the Graviton4 instance was stopped). `Update` used to require every aligned subtree to leave
+at least one byte behind, so the root stayed computable -- which made an `Update` of exactly 16 or
+32 KiB hash half its input through the per-chunk path with scalar merges, and never reach the
+16-way kernel (16 KiB: 3.0 us against 2.1 us for the one-shot). Now, when a subtree ends exactly
+at the end of the input, its two halves are reduced separately: the left is pushed and the right
+is *deferred* like the last chunk used to be, with its size in `_pendingShift`, so
+`FlushPendingCv` merges it in the right units if more input arrives and `Finalize` uses it as
+the root's right child otherwise. The Rust crate does the equivalent by keeping the last
+subtree's children unmerged. The entry condition was relaxed from more than 8 chunks to at least
+8. BDN A/B, `Update`: **0.902 / 0.718 / 0.682 / 0.701 / 0.775** at 8 / 16 / 32 / 64 / 128 KiB,
+correctness gate passing; AVX2-only tier 0.90-0.98. Against Rust: 1.24 at 8 KiB (was 1.45),
+1.19-1.21 at 16 KiB (was 1.50), 1.13 at 32 KiB, 1.08 at 64 KiB. `WholeSubtreeUpdateTests` covers
+exact-subtree updates followed by more input. **x86 only so far:** the NEON and SVE2 aligned
+subtree paths still leave a byte behind and would gain the same way.
+
+**AVX2-only tier (`DOTNET_EnableAVX512=0`) checked for harm:** every dispatch method except two
+compiles identically to the baseline (`HashAlignedSubtree` re-allocates registers with a smaller
+frame; `HashAllAtOnce` gains ~3 prolog instructions from the new 32-byte root path), and timing
+is flat or better (the 4 KiB SSE regression above was found this way and reverted). This tier is
+very noisy -- 1 MiB `Update` swung 0.825-1.138 between identical runs -- so read its sub-5%
+cells as unresolved.
 
 ## Test Framework
 
@@ -287,6 +509,16 @@ lands in one mode or the other, and it reproduces across two CPUs and two operat
 it is RyuJIT choosing a spilling or non-spilling allocation for `Vector512` rather than anything
 about the hardware.
 
+**Superseded 2026-09-23 -- the bimodality was a tiering trap, and a 16-way AVX-512 kernel now
+ships (`HashManyAvx512`).** A big `AggressiveOptimization` kernel whose IL is too large for the
+inliner calls its `AggressiveInlining` helpers as real methods, and under tiered compilation
+those can stay unoptimized **tier-0** code for the life of the process. Whether they get promoted
+varies per process -- hence "bimodal, stable within a process". Proof: the same 16-way kernel was
+fast in every process with `DOTNET_TieredCompilation=0` or `DOTNET_TC_QuickJit=0`, still bimodal
+with `DOTNET_TieredPGO=0`, and fast in 4/4 processes under default tiering once its transpose
+helper was marked `NoInlining | AggressiveOptimization`. The paragraphs below are kept for the
+record; their conclusion is wrong.
+
 So the honest summary is: when the allocation goes well, 512-bit buys between nothing and 16%;
 when it does not, it costs 13-43%; and which one you get is not under your control. That is
 already a poor trade, and a real 16-way kernel would be strictly worse placed than this
@@ -397,6 +629,14 @@ Four traps, each of which cost a run before being written down (2026-09-21):
 `DOTNET_JitDisasmDiffable=1` strips addresses, so disassembly lines are `^ {7}<mnemonic>` with no
 address column -- parse for that, not for an `addr:` prefix.
 
+Two more for comparing listings across builds (2026-09-23): **`DOTNET_JitStdOutFile` appends**, so
+truncate it before every run or you compare against a previous build's listing; and a
+`Class:Method` filter such as `HashManySve2:HashMany` silently matches nothing -- filter by method
+name and pick the listing by its `; Assembly listing for method` header. On ARM the mnemonics are
+indented 12 spaces, not 7. Methods compiled while the thread pool is starting can come out
+truncated or interleaved (seen with `ChunkState:Update` at the scalar tier), so a single
+"different" for a method whose source did not change needs a second run before it means anything.
+
 ### Known dead ends
 
 - **Replacing the `stackalloc Vector256<uint>[16]` message array in `HashManyAvx2` with 16 named locals.**
@@ -433,7 +673,10 @@ address column -- parse for that, not for an `addr:` prefix.
   of 16 message vectors -- about 64 live `Vector128` against ARM64's 32 vector registers -- and
   spills every block. The two-chain interleave that won 18-28% on x86 (`HashFourAvx2`) does not
   port: x86 had spare registers to spend, ARM does not. Do not wire it in again without a core with
-  a larger vector register file.
+  a larger vector register file. **Caveat (2026-09-23):** the SVE2 two-chain kernel spills too and
+  still won 21% on Neoverse-V2 once written without helpers; with helpers it hit the JIT inlining
+  budget and ran 5.6x slower. This kernel's 2.8x may be the same budget failure rather than
+  spilling. Count the calls in its A73 disassembly before treating it as settled.
 - **Padding a 2-chunk remainder into the 4-way NEON kernel.** 24-28% slower than per-chunk scalar on
   Cortex-A73. The kernel always pays for four lanes and NEON is only ~1.5x scalar per lane there, so
   padding wins only when at most one lane is wasted -- 3 chunks gains 10%, 2 chunks loses. NEON has
@@ -445,9 +688,10 @@ address column -- parse for that, not for an `addr:` prefix.
 - Hoisting the first block out of the fused chunk loop to make the middle-block state row constant: tried
   twice, measured worse both times. The two-block win came from removing the loop entirely for a known
   block count.
-- A 16-way AVX-512 `HashMany`: measured ~2.5x slower than AVX2 8-way on Zen 4 (register spilling plus
-  double-pumped 512-bit execution). Register pressure is not the AVX2 kernel's problem either; the
-  disassembly shows ymm16-31 in use with no spills.
+- ~~A 16-way AVX-512 `HashMany`: measured ~2.5x slower than AVX2 8-way on Zen 4.~~ **Reversed
+  2026-09-23**: the slowdown was the tier-0 helper trap (see "x86 round, 2026-09-23"). Written out
+  statement by statement with the transpose helper compiled optimized up front, it runs at
+  0.73-0.86 of two `HashManySerial` calls and now ships as `HashManyAvx512`.
 - Recursive parallel splitting with nested `Parallel.Invoke`: balances perfectly but blocks a pool thread
   at every internal node, and measured 2.4x slower than a flat `Parallel.For` fan-out.
 - `Parallel.For` itself for the flat fan-out: 18-27% slower than queueing every worker up front with

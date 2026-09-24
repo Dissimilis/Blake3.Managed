@@ -83,14 +83,39 @@ internal static class Blake3Tree
     /// </remarks>
     private static readonly int s_fanOutSlots = Math.Max(2, Environment.ProcessorCount / 4);
 
+    /// <summary>
+    /// Slots for lengths above <see cref="LoadGatedLength"/>.
+    /// </summary>
+    /// <remarks>
+    /// Wider than <see cref="s_fanOutSlots"/>, and it has to be. That count comes from an input
+    /// in the band splitting into four units; above the band a 1 MiB input splits into far more,
+    /// so reusing four leaves eight callers in the mixed regime -- four fanning out, four serial
+    /// -- and measured 0.935 / 0.883 / 0.858 at 512 KiB, 1 MiB and 10 MiB, while sixteen callers
+    /// ended up mostly serial and gained 19.1 / 13.8 / 4.5%. Eight callers want every hash
+    /// parallel and sixteen want most of them serial, so the count belongs between the two.
+    /// At <c>ProcessorCount / 2</c>, on a 16-thread Zen 4 host: 1.161 at 512 KiB and 1.134 at
+    /// 1 MiB with sixteen callers, 1.029 at 10 MiB, eight callers 0.977-1.002, single callers
+    /// 0.984-0.995, nothing losing more than 5%. Neutral on four Cortex-A73 cores (0.989-1.011),
+    /// where the floor of 2 applies.
+    /// </remarks>
+    private static readonly int s_largeFanOutSlots = Math.Max(2, Environment.ProcessorCount / 2);
+
     private static int s_midSizeInFlight;
 
     /// <summary>
     /// Whether a one-shot hash of <paramref name="length"/> bytes needs the load-gated
     /// dispatch in <see cref="HashMidSize"/> rather than the serial tree.
     /// </summary>
+    /// <remarks>
+    /// Every length above the serial tree's range is gated, not just the 32-256 chunk band;
+    /// <see cref="LoadGatedLength"/> now only selects which slot count applies. Lengths above it
+    /// used to fan out unconditionally, and that was the worst cell measured against the Rust
+    /// crate: 43,476 MB/s at 1 MiB with sixteen callers against its serial 66,025. The reason
+    /// the gate pays -- the serial tree sustaining more aggregate throughput once every core is
+    /// busy -- is a property of the machine, not of the band, so it does not stop at 256 KiB.
+    /// </remarks>
     internal static bool IsMidSize(int length) =>
-        length > MaxUsefulLength && length <= LoadGatedLength;
+        length > MaxUsefulLength;
 
     /// <summary>
     /// Hashes a mid-size input (see <see cref="IsMidSize"/>) with the thread-pool tree while the
@@ -122,7 +147,7 @@ internal static class Blake3Tree
             // where the formula produces exactly this value. Eight callers at that size is a
             // mixed regime where some fan out and some do not, and it is sensitive to how long
             // each caller holds the counter, so the arithmetic is not free. Left as measured.
-            int slots = s_fanOutSlots;
+            int slots = input.Length <= LoadGatedLength ? s_fanOutSlots : s_largeFanOutSlots;
 
             if (others < slots)
             {
