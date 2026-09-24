@@ -2,7 +2,7 @@
 
 A managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) hash function for .NET, with no native dependencies.
 
-One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAKE3 without shipping a native library, or if you hash large inputs: its default one-shot `Hash()` spreads large inputs across the thread pool, which the other .NET packages only do through an explicit `UpdateWithJoin` call. On a single thread it is in the same range as the Rust binding, sometimes ahead and sometimes behind. If you only hash small inputs and want the last few percent, or you need an implementation someone else has audited, use [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native) instead.
+One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAKE3 without shipping a native library, or if you hash large inputs: its default one-shot `Hash()` spreads large inputs across the thread pool, which the other .NET packages only do through an explicit `UpdateWithJoin` call. On a single x86 thread it is in the same range as the Rust binding, sometimes ahead and sometimes behind; on ARM64 with SVE2 (AWS Graviton4) its one-shot `Hash()` beat the Rust binding at every size measured. If you hash many tiny inputs through the incremental `Hasher` API, or you need an implementation someone else has audited, use [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native) instead.
 
 [![NuGet](https://img.shields.io/nuget/v/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
@@ -12,12 +12,12 @@ One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAK
 
 ## Features
 
-- **Hardware accelerated** - AVX2 8-way parallel hashing, SSE/SSSE3 vectorized compression, ARM NEON 4-way parallel hashing, automatic scalar fallback
+- **Hardware accelerated** - on x86, AVX-512 16-way and AVX2 8-way parallel hashing with SSE/SSSE3 below them; on ARM64, SVE2 (Armv9, e.g. AWS Graviton4) and NEON 4-way parallel hashing; automatic scalar fallback
 - **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out from ~32 KiB too on AVX2 hardware, under the same back-off
 - **Split hashing** - hash pieces independently and combine them into the whole-input digest with `Blake3SubtreeContext`
 - **Zero allocation** for small inputs with `Hasher.Hash()`
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
-- **XOF support** - extendable output with a seekable byte stream and AVX2 batching for long output
+- **XOF support** - extendable output with a seekable byte stream, producing long output 16 blocks at a time with AVX-512, 8 with AVX2 or SVE2
 - **Familiar API** - modeled after [Blake3.NET](https://github.com/xoofx/Blake3.NET)
 - **Targets** `net6.0`, `net8.0` and `net10.0`, with Native AOT support on `net8.0` and above
 
@@ -172,12 +172,12 @@ pieces[pieceIndex] = pieceHasher.Finish();
 
 ## Performance
 
-Above ~32 KiB this library's `Hash()` uses multiple cores while the other columns run on one, so the large-input rows below are a core-count difference rather than a per-core one. Per core it lands within roughly 20% of the Rust binding either way, depending on size.
+Above ~32 KiB this library's `Hash()` uses multiple cores while the other columns run on one, so the large-input rows below are a core-count difference rather than a per-core one. Per core on x86 it lands within roughly 20% of the Rust binding either way, depending on size. The incremental API adds a fixed cost of about 100-125 ns per `Hasher` over the one-shot, which the Rust binding largely avoids, so for inputs of a few hundred bytes or less prefer `Hasher.Hash`.
 
 ### Benchmark environment
 
-Measured on **2026-09-21**, on the Linux benchmark host rather than a laptop, so the
-numbers are not comparable with the 2026-09-09 tables this replaced.
+Measured on **2026-09-24** on the same Linux benchmark host as the 2026-09-21 tables this
+replaced, after the AVX-512 kernels and the faster incremental and XOF paths landed.
 
 ```text
 BenchmarkDotNet 0.15.8, Fedora Linux 44
@@ -206,23 +206,24 @@ powers of 1,024; the chart's GB/s is decimal.
 
 | Input | Blake3.Native 3.0.2 | Blake3 3.0.2 (xoofx) | CryptoHives 0.6.101 | Blake3.Managed (this library) | SHA256 (.NET) |
 |---:|---:|---:|---:|---:|---:|
-| 4 B | 65.18 ± 0.27 ns | 61.90 ± 0.10 ns | 64.50 ± 0.07 ns | 40.31 ± 0.05 ns | 287.73 ± 0.56 ns |
-| 128 B | 117.84 ± 1.61 ns | 94.23 ± 0.44 ns | 104.49 ± 0.10 ns | 87.75 ± 0.09 ns | 323.89 ± 0.98 ns |
-| 1 KiB | 771.00 ± 0.59 ns | 824.70 ± 0.33 ns | 842.49 ± 0.57 ns | 764.66 ± 0.79 ns | 679.29 ± 1.12 ns |
-| 2 KiB | 784.19 ± 0.90 ns | 1719.95 ± 2.09 ns | 1229.34 ± 1.38 ns | 786.51 ± 0.61 ns | 1086.81 ± 0.66 ns |
-| 4 KiB | 1.07 ± 0.00 us | 3.47 ± 0.00 us | 1.33 ± 0.01 us | 0.99 ± 0.00 us | 1.91 ± 0.00 us |
-| 6 KiB | 1.87 ± 0.01 us | 5.19 ± 0.00 us | 1.45 ± 0.00 us | 1.33 ± 0.00 us | 2.73 ± 0.01 us |
-| 8 KiB | 1.18 ± 0.00 us | 1.43 ± 0.00 us | 1.78 ± 0.01 us | 1.52 ± 0.01 us | 3.60 ± 0.00 us |
-| 16 KiB | 1.99 ± 0.01 us | 2.74 ± 0.01 us | 3.00 ± 0.01 us | 2.57 ± 0.01 us | 6.82 ± 0.00 us |
-| 64 KiB | 7.51 ± 0.01 us | 10.20 ± 0.02 us | 10.51 ± 0.06 us | 4.28 ± 0.10 us | 26.60 ± 0.03 us |
-| 128 KiB | 14.94 ± 0.01 us | 18.53 ± 0.02 us | 22.21 ± 0.10 us | 6.38 ± 0.46 us | 52.39 ± 0.05 us |
-| 1 MiB | 119.69 ± 0.30 us | 174.61 ± 0.34 us | 167.01 ± 0.55 us | 26.42 ± 0.29 us | 418.72 ± 0.57 us |
-| 10 MiB | 1.22 ± 0.00 ms | 1.67 ± 0.01 ms | 1.69 ± 0.01 ms | 0.22 ± 0.00 ms | 4.19 ± 0.00 ms |
+| 4 B | 59.23 ± 0.13 ns | 61.91 ± 0.08 ns | 64.55 ± 0.11 ns | 40.15 ± 0.05 ns | 284.11 ± 0.37 ns |
+| 128 B | 117.65 ± 0.45 ns | 94.23 ± 0.25 ns | 104.48 ± 0.26 ns | 87.79 ± 0.07 ns | 321.88 ± 4.43 ns |
+| 1 KiB | 768.46 ± 10.77 ns | 824.63 ± 1.14 ns | 842.67 ± 0.60 ns | 764.45 ± 0.67 ns | 742.31 ± 1.07 ns |
+| 2 KiB | 782.29 ± 0.84 ns | 1719.54 ± 1.46 ns | 1226.47 ± 12.26 ns | 784.48 ± 0.55 ns | 1085.15 ± 3.00 ns |
+| 4 KiB | 1.07 ± 0.00 us | 3.46 ± 0.00 us | 1.33 ± 0.00 us | 0.99 ± 0.00 us | 1.90 ± 0.00 us |
+| 6 KiB | 1.88 ± 0.00 us | 5.19 ± 0.01 us | 1.44 ± 0.00 us | 1.35 ± 0.00 us | 2.73 ± 0.00 us |
+| 8 KiB | 1.17 ± 0.00 us | 1.42 ± 0.00 us | 1.56 ± 0.00 us | 1.38 ± 0.00 us | 3.54 ± 0.01 us |
+| 16 KiB | 1.95 ± 0.00 us | 2.51 ± 0.00 us | 2.98 ± 0.01 us | 2.05 ± 0.00 us | 6.88 ± 0.01 us |
+| 64 KiB | 7.52 ± 0.02 us | 9.35 ± 0.01 us | 10.36 ± 0.05 us | 3.23 ± 0.07 us | 26.65 ± 0.02 us |
+| 128 KiB | 14.88 ± 0.01 us | 18.58 ± 0.02 us | 21.38 ± 0.26 us | 5.15 ± 0.18 us | 52.56 ± 0.04 us |
+| 1 MiB | 119.50 ± 0.18 us | 163.32 ± 0.36 us | 154.92 ± 6.47 us | 21.85 ± 0.09 us | 417.26 ± 0.21 us |
+| 10 MiB | 1.22 ± 0.00 ms | 1.69 ± 0.01 ms | 1.54 ± 0.00 ms | 0.18 ± 0.00 ms | 4.19 ± 0.00 ms |
 
 ![One-shot hash throughput with the parallel range shaded](img/benchmark.svg)
 
-Of the single-threaded sizes in this run, this library is fastest at 4 B, 128 B, 1 KiB,
-4 KiB and 6 KiB, and native is fastest at 2 KiB, 8 KiB and 16 KiB.
+Of the single-threaded sizes in this run, this library is fastest at 4 B, 128 B, 4 KiB and
+6 KiB, level with native at 1 KiB and 2 KiB (within 0.5%), and native is fastest at 8 KiB and
+16 KiB, by 18% and 5%.
 
 ### Extended output (XOF)
 
@@ -232,15 +233,39 @@ thread. The chart measures the complete operation: absorption, output and reset.
 
 | Output | Blake3.Native 3.0.2 | CryptoHives 0.6.101 | Blake3.Managed (this library) |
 |---:|---:|---:|---:|
-| 128 B | 1.55 ± 0.00 us | 1.88 ± 0.00 us | 1.81 ± 0.01 us |
-| 1 KiB | 1.62 ± 0.00 us | 2.24 ± 0.00 us | 1.88 ± 0.01 us |
-| 8 KiB | 2.39 ± 0.00 us | 3.43 ± 0.00 us | 2.94 ± 0.00 us |
-| 128 KiB | 15.51 ± 0.01 us | 24.21 ± 0.03 us | 21.59 ± 0.02 us |
+| 128 B | 1.55 ± 0.00 us | 1.88 ± 0.00 us | 1.76 ± 0.00 us |
+| 1 KiB | 1.62 ± 0.00 us | 2.24 ± 0.00 us | 1.82 ± 0.00 us |
+| 8 KiB | 2.38 ± 0.00 us | 3.43 ± 0.00 us | 2.58 ± 0.00 us |
+| 128 KiB | 15.52 ± 0.04 us | 23.69 ± 0.02 us | 16.30 ± 0.10 us |
 
 ![BLAKE3 absorb, output and reset latency](img/benchmark-xof.svg)
 
-Native is fastest at every output length here; this library is ahead of CryptoHives
-throughout. The XOF numbers come from a separate run on the same machine.
+Native is fastest at every output length here, by 5% at 128 KiB of output and 13% at
+128 B; this library is ahead of CryptoHives throughout. The XOF numbers come from a separate
+run on the same machine.
+
+### ARM64 with SVE2 (AWS Graviton4)
+
+Measured on **2026-09-23** on an EC2 c8g.large: Graviton4 (Neoverse V2, 128-bit SVE2),
+2 cores, Ubuntu 26.04, .NET 10.0.12, BenchmarkDotNet default job. Mean times, single-threaded
+except where marked:
+
+| Input | Blake3.Native 3.0.2 | Blake3.Managed `Hash(input, output)` | Blake3.Managed `Update` + `Finalize` |
+|---:|---:|---:|---:|
+| 4 B | 102.2 ns | 88.1 ns | 209.8 ns |
+| 128 B | 188.0 ns | 166.1 ns | 285.6 ns |
+| 1 KiB | 1.35 us | 1.30 us | 1.43 us |
+| 2 KiB | 2.77 us | 2.11 us | 2.89 us |
+| 4 KiB | 2.92 us | 2.30 us | 2.45 us |
+| 16 KiB | 11.40 us | 7.06 us | 8.59 us |
+| 64 KiB | 45.37 us | 15.70 us (2 cores) | 30.01 us |
+| 1 MiB | 726.1 us | 232.1 us (2 cores) | 459.2 us |
+
+The one-shot hash is faster than the Rust binding at every size here. The incremental API is
+faster from 4 KiB; below that, creating and finishing a `Hasher` costs more than it does in Rust,
+because the hasher is a roughly 2 KB struct that .NET zeroes and copies. Extended output is well
+ahead on this machine: in a separate in-process comparison, 64 KiB of output took 0.28 of the
+Rust binding's time, because the Rust crate produces ARM output one block at a time.
 
 ### Reproducing the results
 
@@ -266,10 +291,16 @@ The implementation automatically selects the best available instruction set at r
 
 | Tier | Instructions | Parallelism |
 |------|-------------|-------------|
-| **AVX2** | 256-bit vectors; AVX-512 VL rotates when available | 8-chunk batches, partial batches for 5–7 chunks, a 3–4 chunk kernel where AVX-512 VL is present, 2-chunk remainders, 8-way parent hashing and 8-block XOF output |
+| **AVX-512** (.NET 8+) | 512-bit vectors | 16-chunk batches for whole 16-chunk subtrees and 16-block XOF output; everything smaller uses the AVX2 tier with AVX-512 VL rotates |
+| **AVX2** | 256-bit vectors | 8-chunk batches, partial batches for 5–7 chunks, a 3–4 chunk kernel where AVX-512 VL is present, 2-chunk remainders, 8-way parent hashing and 8-block XOF output |
 | **SSE/SSSE3** | 128-bit vectors + shuffle | 4 chunks simultaneously, single-lane SIMD fallback |
-| **ARM NEON** | 128-bit vectors | 4 chunks simultaneously; single blocks use the scalar path |
-| **Scalar** | Pure C# | Portable fallback |
+| **ARM SVE2** (.NET 10) | 128-bit SVE vectors with `XAR` (fused xor and rotate) | 8 chunks as two interleaved 4-lane batches, 4-chunk batches, 2- and 3-chunk remainders, 4-way parent hashing and 8-block XOF output |
+| **ARM NEON** | 128-bit vectors | 4 chunks simultaneously, 3-chunk remainders, 4-way parent hashing |
+| **Scalar** | Pure C# | Single blocks on ARM64, and the portable fallback everywhere else |
+
+SVE2 uses the `System.Runtime.Intrinsics.Arm.Sve2` API, which .NET 10 marks experimental; the
+library only reads `Sve2.IsSupported` and `Sve2.XorRotateRight`, and on CPUs without SVE2 the
+NEON path runs unchanged.
 
 ## Building from Source
 
