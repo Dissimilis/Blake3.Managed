@@ -179,9 +179,9 @@ internal static class CompressSse41
     /// </summary>
     /// <remarks>
     /// The generic path calls the compressor once per 64-byte block, and each call reloads the
-    /// chaining value from memory and stores it back afterwards. Fusing the block loop here keeps
-    /// the chaining value in two registers for the whole chunk, so a 1 KB hash does 15 fewer calls
-    /// and loses roughly 60 loads and stores. Everything else in the state is constant: the
+    /// chaining value from memory and stores it back afterwards. Fusing the block loop here saves
+    /// 15 of those calls for a 1 KB hash. It does not keep the chaining value in registers, though:
+    /// <c>DoRoundsShuffle</c> is itself a non-inlined call that takes the rows by <c>ref</c>. Everything else in the state is constant: the
     /// counter is zero, the key is the IV, and only the flags and block length vary.
     /// </remarks>
     [SkipLocalsInit]

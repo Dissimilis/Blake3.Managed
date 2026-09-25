@@ -53,7 +53,7 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - **`HashManySse41.cs`** — SSE 4-way parallel multi-chunk hashing (covers the 4–7 chunk gap below the AVX2 path).
 - **`HashManyAvx2.cs`** — AVX2 8-way parallel multi-chunk hashing, plus `HashParents8` for 8-way parent-node compression.
 - Its separate `HashManyPartial` kernel handles 5–7 chunks without padding. Keep variable offsets out of the full-batch loop: combining them regressed 8 KB inputs.
-- `HashManySerial` interleaves full eight-chunk batches. It runs in the serial one-shot tree, in `Update`'s aligned subtrees (`HashAlignedSubtree`) and in `UpdateWithJoin`'s workers (`JoinJob`). The one-shot parallel workers (`SubtreeCvSerial` -> `CompressSubtreeWide`) keep the original `HashMany`, or `HashMany16` for an exact 16-chunk subtree, and so does `Update`'s lone 5-8 chunk batch. A 2026-09-09 follow-up run measured 7.6% less time at 64 KB in the adaptive job and 21.7% less at 8 KB with AVX-512 disabled; large parallel results were inconclusive.
+- `HashManySerial` steps the four G's of each half-round (`G256x4`) within one eight-chunk batch -- the same lever that won on NEON; it does not interleave two batches. It runs in the serial one-shot tree, in `Update`'s aligned subtrees (`HashAlignedSubtree`) and in `UpdateWithJoin`'s workers (`JoinJob`). The one-shot parallel workers (`SubtreeCvSerial` -> `CompressSubtreeWide`) keep the original `HashMany`, or `HashMany16` for an exact 16-chunk subtree, and so does `Update`'s lone 5-8 chunk batch. A 2026-09-09 follow-up run measured 7.6% less time at 64 KB in the adaptive job and 21.7% less at 8 KB with AVX-512 disabled; large parallel results were inconclusive.
 - **`HashTwoAvx2.cs`** — Two complete chunks in the two 128-bit halves of AVX2 registers, for remainders below the 4-way kernel.
 - **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Requires AVX-512 VL for the 32-register file; dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14).
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
@@ -367,6 +367,11 @@ runs), and reverting it restored 1.001-1.005. `CompressSse41` already had the me
 
 **3. Shared ARM-round changes on x86**: the incremental API fixes give 0.70-0.72 at 64 B
 `Update`/keyed/XOF, 0.90 at 1 KiB.
+
+Two caveats on the numbers below (found 2026-09-25): every "`Update` / Rust" ratio compares our
+incremental API with Rust's *one-shot* `Hash` (the competitive benchmark has no Rust incremental
+row), and the README's BDN report run the next day had 8 KiB one-shot at 1.18x (1.38 vs 1.17 us),
+not 1.07 -- the in-process harness and BDN disagree there; re-measure both in one session.
 
 Afterwards, current / Rust on the AVX-512 tier: one-shot **0.73-0.95 up to 512 B**, 1.00 at 1 KiB,
 1.08-1.10 at 1025-1536 B, 1.01 at 2 KiB, 0.61-0.93 at 3-6 KiB, 1.07 at 8 KiB, **1.04-1.06 at
@@ -760,6 +765,12 @@ path is unambiguous.
 G being 6 adds, 4 xors and 4 rotates, giving 336 `vpaddd` + 224 `vprord` + 232 `vpxor`/`vpxord`.
 The static disassembly of both our kernels contains exactly those counts, so our arithmetic is
 already minimal; there is no redundant math to remove.
+
+**Caveat (2026-09-25): the 355 below mixes two counts.** 1,147 is the whole hash's instructions
+divided by 64 block iterations, so it includes parents and tree glue; the 1,183-instruction
+figure is the whole method listing (prologue 105 + transpose 106 + rounds 876 + epilogue 99), not
+one block. The round phase holds ~84 spill-related instructions per block, so removing every
+spill is worth at most ~7%, not 31%. The paragraph is kept as written.
 
 **Our own overhead is the solid result here: 1,147 against a 792 floor is 355 extra instructions
 per block, 31% overhead.** That figure is measured entirely on our own code and depends on no
