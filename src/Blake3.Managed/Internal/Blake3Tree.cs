@@ -245,6 +245,24 @@ internal static class Blake3Tree
         // 16 chunks is the floor: 8-chunk units measured the same within noise, 4-chunk units
         // measured worse at 128-256 KB. All logical cores measured better than any smaller cap.
         int unitChunks = 16;
+
+        // big.LITTLE, up to 1 MiB: cut the input much finer. With cores of two speeds the job
+        // ends when the last unit on a slow core does, and coarse units made adding the slow
+        // cores a loss -- on an ODROID N2+ (4x A73 + 2x A53) a 1 MiB hash took 776 us on all six
+        // cores against 592 us on the four A73s alone (2026-09-25). Four-chunk units, 32 per
+        // core, measured 0.47 / 0.67 / 0.72 / 0.82 / 0.75 of the time at 64 / 192 / 256 / 512
+        // KiB / 1 MiB, but 1.06-1.08 at 128 KiB, where the old sizing's eight 16-chunk units
+        // happen to balance four fast and two slow cores exactly. Above 1 MiB it was a tie at
+        // 2 MiB and 9% / 6% worse at 4 / 10 MiB: the tail is then a small share of the job and
+        // the extra units (per-unit parent tails, a serial fold of ~n parents) are not. Only
+        // where the cores differ: on a uniform x86 host 4-chunk units measured slower. The ARM
+        // check is a JIT-time constant, so other platforms compile as before.
+        if (HashManyNeon.IsSupported && totalChunks <= 1024 && CoreTopology.IsHeterogeneous)
+        {
+            targetUnits = Math.Max(2, degree * 32);
+            unitChunks = 4;
+        }
+
         while (totalChunks / unitChunks > targetUnits * 2 && unitChunks < 4096)
         {
             unitChunks *= 2;
@@ -300,6 +318,85 @@ internal static class Blake3Tree
         finally
         {
             ArrayPool<uint>.Shared.Return(cvBuffer);
+        }
+    }
+
+    /// <summary>
+    /// Whether this machine's cores run at clearly different speeds (big.LITTLE), read once from
+    /// Linux sysfs: <c>cpu_capacity</c> where the kernel exposes it, else
+    /// <c>cpufreq/cpuinfo_max_freq</c>. Anything unreadable counts as uniform.
+    /// </summary>
+    /// <remarks>
+    /// A class of its own so the files are read on the first parallel hash that asks, not when
+    /// <see cref="Blake3Tree"/> is first touched. Only the CPUs the process may run on count
+    /// (<c>Cpus_allowed_list</c> at startup): pinned to the A73s alone, the finer units were a
+    /// 6.6% loss at 1 MiB, because there is no slow core to wait for.
+    /// </remarks>
+    private static class CoreTopology
+    {
+        internal static readonly bool IsHeterogeneous = Detect();
+
+        private static bool Detect()
+        {
+            try
+            {
+                if (!OperatingSystem.IsLinux()) return false;
+
+                HashSet<int>? allowed = AllowedCpus();
+                int min = int.MaxValue, max = 0;
+                foreach (var dir in Directory.EnumerateDirectories("/sys/devices/system/cpu", "cpu*"))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (name.Length < 4 || !int.TryParse(name.AsSpan(3), out int cpu)) continue;
+                    if (allowed is not null && !allowed.Contains(cpu)) continue;
+
+                    int value = ReadInt(Path.Combine(dir, "cpu_capacity"));
+                    if (value <= 0) value = ReadInt(Path.Combine(dir, "cpufreq", "cpuinfo_max_freq"));
+                    if (value <= 0) continue;
+
+                    min = Math.Min(min, value);
+                    max = Math.Max(max, value);
+                }
+
+                // More than 10% apart: a real second core type, not two clusters of one design
+                // whose frequency tables differ by a step.
+                return max > 0 && max > min + min / 10;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int ReadInt(string path) =>
+            File.Exists(path) && int.TryParse(File.ReadAllText(path).AsSpan().Trim(), out int value) ? value : 0;
+
+        // "Cpus_allowed_list:\t0-1,4" -> {0, 1, 4}; null when absent or unparsable (all CPUs).
+        private static HashSet<int>? AllowedCpus()
+        {
+            const string prefix = "Cpus_allowed_list:";
+            foreach (string line in File.ReadLines("/proc/self/status"))
+            {
+                if (!line.StartsWith(prefix, StringComparison.Ordinal)) continue;
+
+                var cpus = new HashSet<int>();
+                foreach (string part in line.Substring(prefix.Length).Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int dash = part.IndexOf('-');
+                    if (dash < 0)
+                    {
+                        if (!int.TryParse(part, out int single)) return null;
+                        cpus.Add(single);
+                    }
+                    else
+                    {
+                        if (!int.TryParse(part.AsSpan(0, dash), out int from) || !int.TryParse(part.AsSpan(dash + 1), out int to)) return null;
+                        for (int c = from; c <= to; c++) cpus.Add(c);
+                    }
+                }
+                return cpus.Count > 0 ? cpus : null;
+            }
+            return null;
         }
     }
 
@@ -772,9 +869,9 @@ internal static class Blake3Tree
         }
 
         // Exactly three whole chunks on ARM: the 4-way NEON kernel with the spare lane pointed at
-        // chunk zero. Three is the only remainder worth padding -- measured on Cortex-A73,
-        // three chunks gain 10% over per-chunk scalar while two lose 24-28%, because the kernel
-        // always pays for four lanes and NEON here is only ~1.5x scalar per lane.
+        // chunk zero. Three is the only remainder worth padding, because the kernel always pays
+        // for four lanes: with the 2026-09-25 kernel three chunks take 0.78 of the scalar time on
+        // Cortex-A73 and 0.67 on Neoverse-V1, while two would still lose on the A73 (~1.18x).
         if (HashManyNeon.IsSupported && remaining.Length >= chunkLen * 3)
         {
             HashManyNeon.HashManyPartial(remaining, 3, key, counter, flags,

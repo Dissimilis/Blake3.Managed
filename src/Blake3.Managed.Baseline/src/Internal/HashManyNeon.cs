@@ -293,6 +293,13 @@ internal static class HashManyNeon
                                        ReadOnlySpan<uint> key, ulong startCounter,
                                        uint flags, Span<uint> cvs)
     {
+#if NET10_0_OR_GREATER
+        if (HashManySve2.IsSupported)
+        {
+            HashManySve2.HashMany(chunks, numChunks, key, startCounter, flags, cvs);
+            return;
+        }
+#endif
         const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
 
         Vector128<uint> cv0 = Vector128.Create(key[0]);
@@ -463,10 +470,10 @@ internal static class HashManyNeon
     /// zero so the batch stays inside the input span. ARM otherwise drops from the 4-way kernel
     /// straight to per-chunk scalar compression for this remainder.
     /// <para>
-    /// Callers should pass only <c>numChunks == 3</c>. The kernel accepts 2 as well, but two
-    /// chunks measured 24-28% SLOWER than the scalar path on Cortex-A73 (2026-09-21): the kernel
-    /// always pays for four lanes, and NEON is only about 1.5x scalar per lane on that core, so
-    /// padding pays off only when at most one lane is wasted.
+    /// Callers should pass only <c>numChunks == 3</c>, or 2 when <c>HashManySve2</c> is
+    /// supported. Two chunks measured 24-28% SLOWER than the scalar path on Cortex-A73
+    /// (2026-09-21): the kernel always pays for four lanes, and NEON is only about 1.5x scalar per
+    /// lane on that core, so padding pays off only when at most one lane is wasted.
     /// </para>
     /// </summary>
     [SkipLocalsInit]
@@ -475,6 +482,13 @@ internal static class HashManyNeon
                                        ReadOnlySpan<uint> key, ulong startCounter,
                                        uint flags, Span<uint> cvs)
     {
+#if NET10_0_OR_GREATER
+        if (HashManySve2.IsSupported)
+        {
+            HashManySve2.HashManyPartial(chunks, numChunks, key, startCounter, flags, cvs);
+            return;
+        }
+#endif
         const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
 
         // Unused lanes reread chunk zero, keeping partial batches inside the input span.
@@ -662,6 +676,13 @@ internal static class HashManyNeon
                                            ReadOnlySpan<uint> key, uint flags,
                                            Span<uint> cvs)
     {
+#if NET10_0_OR_GREATER
+        if (HashManySve2.IsSupported)
+        {
+            HashManySve2.HashParents4(parentBlocks, key, flags, cvs);
+            return;
+        }
+#endif
         fixed (uint* inPtr = parentBlocks)
         {
             byte* basePtr = (byte*)inPtr;

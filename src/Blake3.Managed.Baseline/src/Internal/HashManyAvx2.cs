@@ -62,11 +62,11 @@ internal static class HashManyAvx2
                              ref Vector256<uint> c, ref Vector256<uint> d,
                              Vector256<uint> mx, Vector256<uint> my)
     {
-        a = Avx2.Add(Avx2.Add(a, b), mx);
+        a = Avx2.Add(Avx2.Add(a, mx), b);
         d = RotateRight16(Avx2.Xor(d, a));
         c = Avx2.Add(c, d);
         b = RotateRight12(Avx2.Xor(b, c));
-        a = Avx2.Add(Avx2.Add(a, b), my);
+        a = Avx2.Add(Avx2.Add(a, my), b);
         d = RotateRight8(Avx2.Xor(d, a));
         c = Avx2.Add(c, d);
         b = RotateRight7(Avx2.Xor(b, c));
@@ -631,10 +631,10 @@ internal static class HashManyAvx2
         Vector256<uint> m2x, Vector256<uint> m2y,
         Vector256<uint> m3x, Vector256<uint> m3y)
     {
-        a0 = Avx2.Add(Avx2.Add(a0, b0), m0x);
-        a1 = Avx2.Add(Avx2.Add(a1, b1), m1x);
-        a2 = Avx2.Add(Avx2.Add(a2, b2), m2x);
-        a3 = Avx2.Add(Avx2.Add(a3, b3), m3x);
+        a0 = Avx2.Add(Avx2.Add(a0, m0x), b0);
+        a1 = Avx2.Add(Avx2.Add(a1, m1x), b1);
+        a2 = Avx2.Add(Avx2.Add(a2, m2x), b2);
+        a3 = Avx2.Add(Avx2.Add(a3, m3x), b3);
 
         d0 = RotateRight16(Avx2.Xor(d0, a0));
         d1 = RotateRight16(Avx2.Xor(d1, a1));
@@ -651,10 +651,10 @@ internal static class HashManyAvx2
         b2 = RotateRight12(Avx2.Xor(b2, c2));
         b3 = RotateRight12(Avx2.Xor(b3, c3));
 
-        a0 = Avx2.Add(Avx2.Add(a0, b0), m0y);
-        a1 = Avx2.Add(Avx2.Add(a1, b1), m1y);
-        a2 = Avx2.Add(Avx2.Add(a2, b2), m2y);
-        a3 = Avx2.Add(Avx2.Add(a3, b3), m3y);
+        a0 = Avx2.Add(Avx2.Add(a0, m0y), b0);
+        a1 = Avx2.Add(Avx2.Add(a1, m1y), b1);
+        a2 = Avx2.Add(Avx2.Add(a2, m2y), b2);
+        a3 = Avx2.Add(Avx2.Add(a3, m3y), b3);
 
         d0 = RotateRight8(Avx2.Xor(d0, a0));
         d1 = RotateRight8(Avx2.Xor(d1, a1));

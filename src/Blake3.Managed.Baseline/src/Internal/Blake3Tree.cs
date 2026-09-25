@@ -27,6 +27,9 @@ internal static class Blake3Tree
     /// <summary>Chunks the best available kernel hashes at once.</summary>
     private static int SimdDegree =>
         HashManyAvx2.IsSupported ? 8
+#if NET10_0_OR_GREATER
+        : HashManySve2.IsSupported ? 8
+#endif
         : HashManyNeon.IsSupported || HashManySse41.IsSupported ? 4
         : 1;
 
@@ -640,6 +643,12 @@ internal static class Blake3Tree
     private static int CompressSubtreeWide(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
         ulong chunkCounter, uint flags, Span<uint> outCvs, bool interleaveFullBatches = false)
     {
+#if NET8_0_OR_GREATER
+        if (HashManyAvx512.IsSupported && input.Length == 16 * Blake3Constants.ChunkLen)
+        {
+            return CompressSubtree16(input, key, chunkCounter, flags, outCvs);
+        }
+#endif
         // Floor of 2: with a scalar-only kernel the leaf case would return a single CV, and a
         // parent node needs two children.
         int degree = Math.Max(SimdDegree, 2);
@@ -670,6 +679,22 @@ internal static class Blake3Tree
         return CompressParents(children, leftN + rightN, key, flags, outCvs);
     }
 
+#if NET8_0_OR_GREATER
+    /// <summary>
+    /// A 16-chunk subtree in one AVX-512 call: its 16 chunk CVs, compressed into 8 parents --
+    /// exactly what the two 8-chunk halves produce through the general path.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int CompressSubtree16(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        ulong chunkCounter, uint flags, Span<uint> outCvs)
+    {
+        Span<uint> children = stackalloc uint[16 * 8];
+        HashManyAvx512.HashMany16(input, key, chunkCounter, flags, children);
+        return CompressParents(children, 16, key, flags, outCvs);
+    }
+#endif
+
     /// <summary>
     /// Hashes the chunks of a leaf-sized subtree, using the widest kernel each remainder allows.
     /// The final chunk may be partial.
@@ -683,6 +708,18 @@ internal static class Blake3Tree
         var remaining = input;
         ulong counter = chunkCounter;
         int n = 0;
+
+#if NET10_0_OR_GREATER
+        // SVE2: two interleaved 4-chunk batches (see HashManySve2.HashMany8).
+        while (HashManySve2.IsSupported && remaining.Length >= chunkLen * 8)
+        {
+            HashManySve2.HashMany8(remaining.Slice(0, chunkLen * 8), key, counter, flags,
+                cvs.Slice(n * 8, 64));
+            remaining = remaining.Slice(chunkLen * 8);
+            counter += 8;
+            n += 8;
+        }
+#endif
 
         while (remaining.Length >= chunkLen * 8 && HashManyAvx2.IsSupported)
         {
@@ -754,6 +791,21 @@ internal static class Blake3Tree
             counter += 2;
             n += 2;
         }
+
+#if NET10_0_OR_GREATER
+        // With SVE2 two chunks are worth padding too: the XAR kernel does four chunks in 0.75 of
+        // the scalar time for two (Graviton4, 2026-09-23). Kept as a separate block after
+        // the others: a variable count in the NEON block, or this block placed next to it, changed
+        // the x86 and Cortex-A73 code for this method.
+        if (HashManySve2.IsSupported && remaining.Length >= chunkLen * 2)
+        {
+            HashManyNeon.HashManyPartial(remaining, 2, key, counter, flags,
+                cvs.Slice(n * 8, 16));
+            remaining = remaining.Slice(2 * chunkLen);
+            counter += 2;
+            n += 2;
+        }
+#endif
 
         while (remaining.Length > 0)
         {

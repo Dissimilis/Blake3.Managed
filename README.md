@@ -162,7 +162,7 @@ pieces[pieceIndex] = pieceHasher.Finish();
 
 | Type | Description |
 |------|-------------|
-| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`. Static `Hash()` and `HashKeyed()` for one-shot hashing. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()` and `HashKeyed()`. |
+| `Hasher` | Main hasher struct. Factory methods: `New()`, `NewKeyed()`, `NewDeriveKey()`, each also as an `out` overload (`Hasher.New(out var hasher)`) that builds the ~1.9 KB state in place instead of copying it -- noticeably faster for short incremental inputs; dispose that one with `try`/`finally`, since `using (hasher)` would dispose a copy. Static `Hash()` and `HashKeyed()` for one-shot hashing. Incremental via `Update()`/`UpdateWithJoin()`/`Finalize()`. Static `MaxDegreeOfParallelism` caps the fan-out used by `Hash()` and `HashKeyed()`. |
 | `Hash` | Fixed 32-byte output struct with constant-time equality and allocation-free `ToString()`. |
 | `Blake3Stream` | Stream wrapper that hashes data as it flows through. |
 | `Blake3HashAlgorithm` | `System.Security.Cryptography.HashAlgorithm` adapter for interop with existing APIs. |
@@ -300,7 +300,8 @@ The implementation automatically selects the best available instruction set at r
 
 SVE2 uses the `System.Runtime.Intrinsics.Arm.Sve2` API, which .NET 10 marks experimental; the
 library only reads `Sve2.IsSupported` and `Sve2.XorRotateRight`, and on CPUs without SVE2 the
-NEON path runs unchanged.
+NEON path runs unchanged. The NEON path is tested on AWS Graviton3 (Neoverse V1), which has SVE
+but not SVE2 and so takes it.
 
 ## Building from Source
 

@@ -25,7 +25,7 @@ distort small-input measurements.
 
 ## Snapshot provenance
 
-Refreshed to commit `2e9c354`, 2026-09-09. During an active optimization campaign the baseline is
+Refreshed to commit `eba1c46` (v1.8.0), 2026-09-25, for the NEON campaign. During an active optimization campaign the baseline is
 moved forward to the last commit, so each experiment is measured against the code it is trying to
 improve rather than against a distant starting point. Numbers taken before and after a refresh are
 not comparable.

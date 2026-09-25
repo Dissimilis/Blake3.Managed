@@ -436,6 +436,83 @@ public unsafe struct Hasher : IDisposable
         return new Hasher(keyWords, Blake3Constants.DeriveKeyMaterial);
     }
 
+    /// <summary>
+    /// Construct a new Hasher for the regular hash function directly in <paramref name="hasher"/>.
+    /// </summary>
+    /// <remarks>
+    /// Same result as <c>hasher = Hasher.New()</c>, faster for short inputs. <see cref="Hasher"/>
+    /// is a ~1.9 KB struct, and returning one by value makes the caller zero its local and then
+    /// copy the whole state into it; building it in the caller's storage does neither. For a
+    /// 64-byte New/Update/Finalize/Dispose that measured 0.58-0.79 of the time on ARM64 and 0.70
+    /// on x86 (2026-09-25); from a few kilobytes up the difference disappears into the hashing.
+    /// <para>
+    /// Dispose it with <c>try</c>/<c>finally</c>, not <c>using (hasher)</c>: a <c>using</c>
+    /// statement over an existing struct variable disposes a copy, so the key material in
+    /// <paramref name="hasher"/> itself would not be cleared.
+    /// </para>
+    /// </remarks>
+    /// <param name="hasher">Receives the new hasher.</param>
+    public static void New(out Hasher hasher)
+    {
+        Construct(out hasher, Blake3Constants.IV, 0);
+    }
+
+    /// <summary>
+    /// Construct a new Hasher for the keyed hash function directly in <paramref name="hasher"/>.
+    /// See <see cref="New(out Hasher)"/> for when this is worth using.
+    /// </summary>
+    /// <param name="key">A 32 byte key.</param>
+    /// <param name="hasher">Receives the new hasher.</param>
+    [SkipLocalsInit]
+    public static void NewKeyed(ReadOnlySpan<byte> key, out Hasher hasher)
+    {
+        if (key.Length != 32) throw new ArgumentOutOfRangeException(nameof(key), "Expecting the key to be 32 bytes");
+
+        Span<uint> keyWords = stackalloc uint[8];
+        Blake3Core.WordsFromLeBytes(key, keyWords);
+        Construct(out hasher, keyWords, Blake3Constants.KeyedHash);
+    }
+
+    /// <summary>
+    /// Construct a new Hasher for the key derivation function directly in <paramref name="hasher"/>.
+    /// See <see cref="New(out Hasher)"/> for when this is worth using.
+    /// </summary>
+    /// <param name="text">The context string.</param>
+    /// <param name="hasher">Receives the new hasher.</param>
+    public static void NewDeriveKey(string text, out Hasher hasher)
+    {
+        NewDeriveKey(Encoding.UTF8.GetBytes(text), out hasher);
+    }
+
+    /// <summary>
+    /// Construct a new Hasher for the key derivation function directly in <paramref name="hasher"/>.
+    /// See <see cref="New(out Hasher)"/> for when this is worth using.
+    /// </summary>
+    /// <param name="str">The context string, as bytes.</param>
+    /// <param name="hasher">Receives the new hasher.</param>
+    [SkipLocalsInit]
+    public static void NewDeriveKey(ReadOnlySpan<byte> str, out Hasher hasher)
+    {
+        var contextHasher = new Blake3Core.HasherState(Blake3Constants.IV, Blake3Constants.DeriveKeyContext);
+        contextHasher.Update(str);
+        var contextOutput = contextHasher.Finalize();
+        Span<byte> contextBytes = stackalloc byte[Blake3Constants.KeyLen];
+        contextOutput.RootOutputBytes(contextBytes);
+
+        Span<uint> keyWords = stackalloc uint[8];
+        Blake3Core.WordsFromLeBytes(contextBytes, keyWords);
+        Construct(out hasher, keyWords, Blake3Constants.DeriveKeyMaterial);
+    }
+
+    // The in-place counterpart of the private constructor: every field but the CV stack is
+    // written (see HasherState.Initialize), and nothing is zeroed or copied.
+    private static void Construct(out Hasher hasher, ReadOnlySpan<uint> key, uint flags)
+    {
+        Unsafe.SkipInit(out hasher);
+        hasher._state.Initialize(key, flags, 0);
+        hasher._initialized = true;
+    }
+
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void ThrowNotInitialized()

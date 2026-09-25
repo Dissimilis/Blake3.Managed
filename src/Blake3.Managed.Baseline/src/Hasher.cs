@@ -55,7 +55,10 @@ public unsafe struct Hasher : IDisposable
 
     private Hasher(ReadOnlySpan<uint> key, uint flags)
     {
-        _state = new Blake3Core.HasherState(key, flags);
+        // In place, not `_state = new HasherState(...)`: that zeroes and copies ~1.9 KB per
+        // hasher. See HasherState.Initialize.
+        Unsafe.SkipInit(out this);
+        _state.Initialize(key, flags, 0);
         _initialized = true;
     }
 
@@ -282,7 +285,7 @@ public unsafe struct Hasher : IDisposable
     {
         if (_initialized)
         {
-            _state = default;
+            _state.Clear();
             _initialized = false;
         }
     }
@@ -303,7 +306,7 @@ public unsafe struct Hasher : IDisposable
     public void Update(ReadOnlySpan<byte> data)
     {
         if (!_initialized) ThrowNotInitialized();
-        _state.Update(data);
+        if (!_state.TryUpdateWithinChunk(data)) _state.Update(data);
     }
 
     /// <summary>
@@ -314,7 +317,7 @@ public unsafe struct Hasher : IDisposable
     public void Update<T>(ReadOnlySpan<T> data) where T : unmanaged
     {
         if (!_initialized) ThrowNotInitialized();
-        _state.Update(MemoryMarshal.AsBytes(data));
+        if (!_state.TryUpdateWithinChunk(MemoryMarshal.AsBytes(data))) _state.Update(MemoryMarshal.AsBytes(data));
     }
 
     /// <summary>
@@ -324,7 +327,7 @@ public unsafe struct Hasher : IDisposable
     public void UpdateWithJoin(ReadOnlySpan<byte> data)
     {
         if (!_initialized) ThrowNotInitialized();
-        _state.UpdateWithJoin(data);
+        if (!_state.TryUpdateWithinChunk(data)) _state.UpdateWithJoin(data);
     }
 
     /// <summary>
@@ -333,7 +336,7 @@ public unsafe struct Hasher : IDisposable
     public void UpdateWithJoin<T>(ReadOnlySpan<T> data) where T : unmanaged
     {
         if (!_initialized) ThrowNotInitialized();
-        _state.UpdateWithJoin(MemoryMarshal.AsBytes(data));
+        if (!_state.TryUpdateWithinChunk(MemoryMarshal.AsBytes(data))) _state.UpdateWithJoin(MemoryMarshal.AsBytes(data));
     }
 
     /// <summary>

@@ -63,11 +63,11 @@ internal static class OutputManyAvx2
                              ref Vector256<uint> c, ref Vector256<uint> d,
                              Vector256<uint> mx, Vector256<uint> my)
     {
-        a = Avx2.Add(Avx2.Add(a, b), mx);
+        a = Avx2.Add(Avx2.Add(a, mx), b);
         d = RotateRight16(Avx2.Xor(d, a));
         c = Avx2.Add(c, d);
         b = RotateRight12(Avx2.Xor(b, c));
-        a = Avx2.Add(Avx2.Add(a, b), my);
+        a = Avx2.Add(Avx2.Add(a, my), b);
         d = RotateRight8(Avx2.Xor(d, a));
         c = Avx2.Add(c, d);
         b = RotateRight7(Avx2.Xor(b, c));
