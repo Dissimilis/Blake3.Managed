@@ -133,6 +133,69 @@ caller across 32-128 KiB with nothing worse than 0.992 at eight or sixteen calle
 Both adapters now have before/after coverage in `--api`, and `--concurrent` takes `--join` to
 measure this path -- it previously only ever ran `Hasher.Hash` and was blind to it.
 
+### SSE shuffle scheduling experiment, 2026-10-05
+
+Moving row0's fourteen diagonal/undiagonal shuffles immediately after its last
+Y-half read (`RotateRight8`), before row2's add and row1's rotate, was implemented
+and then reverted: **no demonstrated performance win**. On Windows Ryzen 7 PRO
+7840U / .NET 10.0.12, the intended ordering appeared in disassembly with unchanged
+instruction counts and code sizes: 372 instructions / 1,955 bytes with AVX-512VL,
+480 / 2,211 without it. Stack vector accesses did not increase. All 495 tests
+passed in each ISA configuration.
+
+Five paired process launches, with fifteen ABBA/BAAB rounds per size and the
+per-call parallelism setter retained, gave a 64-byte candidate/baseline ratio of
+**0.9936, 95% CI 0.9577-1.0308**. Three unchanged/unchanged launches were also noisy
+(64-byte ratio 0.9939, CI 0.9107-1.0847). The baseline was a fresh copy of HEAD,
+not the frozen Baseline project. Ten sizes from 4 bytes through 8 KiB were checked;
+the full 27-size sweep stopped at the failed performance gate. These are local
+diagnostic measurements, not CryptoHives scoreboard results or M4 evidence.
+
+Treat this as inconclusive and not worth keeping on present evidence, rather
+than proof that instruction scheduling cannot help. Revisit only with a more
+stable measurement environment or materially different generated code, such as
+after removing the SSE round-call boundary. Do not re-propose the same reorder
+as an untested optimization.
+
+### Fused non-root SSE chunk loop, 2026-10-05
+
+Kept a dedicated `CompressSse41.HashChunkCv` loop for the tree's 1..1024-byte
+non-root chunks. It folds each block's CV locally, avoids repeated generic
+span-compressor calls, and loads full final blocks directly. Partial blocks use
+the existing bounded padding helper. Full-width counters, caller flags and
+CHUNK_START/CHUNK_END are preserved; ROOT is never added. Other architectures
+retain the existing fallback. `DoRoundsShuffle` retains its original attributes.
+
+On Fedora 44 / Ryzen 7 8845HS / .NET 10.0.11, real-project BenchmarkDotNet against
+fresh HEAD `b1a5f77` measured **915.7 -> 878.5 ns at 1,025 bytes (4.1% less time)**
+and **2,821.7 -> 2,716.0 ns at 10,000 bytes (3.7%)**. These use a reused heap
+output buffer and the issue adapter's per-call `MaxDegreeOfParallelism=-1`
+setter. Two launches, at least six warmups and 15 measurement iterations, 1%
+target error, no outlier removal. This is local before/after evidence, not a
+competitor ranking or an Apple Silicon result.
+
+All 496 tests passed with native ISA and AVX-512 disabled, including a new
+scalar differential check over all chunk lengths, four flag modes, five counter
+cases, unaligned input and guarded output. The benchmark correctness gate passed
+7,492 checks. All three library target frameworks build.
+
+Five paired process launches across all 27 sizes, with three unchanged/unchanged
+controls per ISA, reproduced the 1,025-byte gain: native ratio 0.9563 (95% CI
+0.9451-0.9676), AVX2-only 0.9724 (0.9708-0.9740). Native 10,000 bytes was 0.9775;
+AVX2-only 10,000 bytes was inconclusive. Native 1 MiB showed a small 0.36%
+regression; larger AVX2 measurements were noisier. This is not an all-size win.
+An apparent AVX2 4-byte probe slowdown did not reproduce in dedicated BDN
+(45.18 -> 45.08 ns); no gain is claimed there.
+Disassembly confirms the fused body calls the round helper directly instead of
+calling the generic span compressor for every block.
+
+**Rejected P1 round inlining.** Source-copy assemblies in separate load contexts
+suggested small-input gains, but real-project BenchmarkDotNet did not reproduce
+the 128/1024-byte benefit, including the exact adapter-shaped call. Disassembly
+confirmed inlining happened. The harness discrepancy remains unexplained; do not
+reuse those probe gains as evidence. Both inlining and the attempted AVX2 guard
+were reverted. Prefer actual project references and confirm changes with BDN.
+
 ### ARM64
 
 First benchmarked 2026-09-19 on a Cortex-A73/A53 big.LITTLE board. Pin to the big cores and

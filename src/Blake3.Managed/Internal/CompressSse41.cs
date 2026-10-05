@@ -253,6 +253,79 @@ internal static class CompressSse41
     }
 
     /// <summary>
+    /// Computes the CV of a 1..1024-byte non-root chunk with a fused block loop.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static void HashChunkCv(ReadOnlySpan<uint> key, ReadOnlySpan<byte> input,
+        ulong chunkCounter, uint flags, Span<uint> output)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+
+        ref uint keyRef = ref MemoryMarshal.GetReference(key);
+        var cv0 = VectorCompat.Load(ref keyRef);
+        var cv1 = VectorCompat.Load(ref keyRef, 4);
+
+        ref byte src = ref MemoryMarshal.GetReference(input);
+        int pos = 0;
+        uint startFlag = Blake3Constants.ChunkStart;
+
+        // Every block except the last, which must carry CHUNK_END without ROOT.
+        while (input.Length - pos > Blake3Constants.BlockLen)
+        {
+            var row0 = cv0;
+            var row1 = cv1;
+            var row2 = ivRow;
+            var row3 = Vector128.Create((uint)chunkCounter, (uint)(chunkCounter >> 32),
+                (uint)Blake3Constants.BlockLen, flags | startFlag);
+
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3,
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref b),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48)));
+
+            // Fold the CV locally instead of calling the generic span-based compressor.
+            cv0 = Sse2.Xor(row0, row2);
+            cv1 = Sse2.Xor(row1, row3);
+
+            pos += Blake3Constants.BlockLen;
+            startFlag = 0;
+        }
+
+        int lastLen = input.Length - pos;
+        uint lastFlags = flags | startFlag | Blake3Constants.ChunkEnd;
+
+        Vector128<uint> m0, m1, m2, m3;
+        if (lastLen == Blake3Constants.BlockLen)
+        {
+            // Full final block: no padding needed, so read it where it lies.
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            m0 = Unsafe.ReadUnaligned<Vector128<uint>>(ref b);
+            m1 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16));
+            m2 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32));
+            m3 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48));
+        }
+        else
+        {
+            LoadPaddedBlock(input.Slice(pos, lastLen), out m0, out m1, out m2, out m3);
+        }
+
+        var f0 = cv0;
+        var f1 = cv1;
+        var f2 = ivRow;
+        var f3 = Vector128.Create((uint)chunkCounter, (uint)(chunkCounter >> 32), (uint)lastLen, lastFlags);
+
+        DoRoundsShuffle(ref f0, ref f1, ref f2, ref f3, m0, m1, m2, m3);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(output);
+        VectorCompat.Store(Sse2.Xor(f0, f2), ref outRef);
+        VectorCompat.Store(Sse2.Xor(f1, f3), ref outRef, 4);
+    }
+
+    /// <summary>
     /// Root compression of a single block in default (unkeyed) mode, producing the 32-byte digest.
     /// </summary>
     /// <remarks>

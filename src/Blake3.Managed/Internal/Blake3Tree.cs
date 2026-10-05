@@ -924,6 +924,12 @@ internal static class Blake3Tree
     private static void HashChunkCv(ReadOnlySpan<uint> key, ReadOnlySpan<byte> chunk,
         ulong chunkCounter, uint flags, Span<uint> cv)
     {
+        if (CompressSse41.IsSupported)
+        {
+            CompressSse41.HashChunkCv(key, chunk, chunkCounter, flags, cv);
+            return;
+        }
+
         key[..8].CopyTo(cv);
 
         int pos = 0;
