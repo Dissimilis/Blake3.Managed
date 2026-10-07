@@ -246,9 +246,9 @@ public unsafe struct Hasher : IDisposable
             }
             else
             {
-                // Extended output from one chunk needs the chunk's full Output state, which only
-                // the incremental path produces.
-                HashViaState(input, output);
+                // Extended output from one chunk needs the chunk's full Output state, which the
+                // chunk state produces on its own: the ~1.9 KB HasherState around it adds nothing.
+                HashOneChunkXof(input, output);
             }
         }
         else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
@@ -267,15 +267,15 @@ public unsafe struct Hasher : IDisposable
     }
 
     /// <summary>
-    /// Hashes through the incremental state. Used where the tree builders do not apply.
+    /// Extended output from an input of at most one chunk, which is that chunk's root output.
     /// </summary>
+    [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void HashViaState(ReadOnlySpan<byte> input, Span<byte> output)
+    private static void HashOneChunkXof(ReadOnlySpan<byte> input, Span<byte> output)
     {
-        var state = new Blake3Core.HasherState(Blake3Constants.IV, 0);
-        state.Update(input);
-        var finalOutput = state.Finalize();
-        finalOutput.RootOutputBytes(output);
+        var chunk = new Blake3Core.ChunkState(Blake3Constants.IV, 0, 0);
+        chunk.Update(input);
+        chunk.CreateOutput().RootOutputBytes(output);
     }
 
     /// <summary>
