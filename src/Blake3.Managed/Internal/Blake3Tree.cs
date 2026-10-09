@@ -721,6 +721,14 @@ internal static class Blake3Tree
         bool inA = true;
         while (numCvs > 2)
         {
+            if (numCvs <= 4)
+            {
+                // The last level yields exactly two CVs (one or two scalar parents, plus an odd
+                // child): write them straight into the root's block instead of copying them there.
+                CompressParents(inA ? a : b, numCvs, key, flags, parentBlock);
+                return;
+            }
+
             numCvs = inA
                 ? CompressParents(a, numCvs, key, flags, b)
                 : CompressParents(b, numCvs, key, flags, a);
@@ -744,6 +752,17 @@ internal static class Blake3Tree
         if (HashManyAvx512.IsSupported && input.Length == 16 * Blake3Constants.ChunkLen)
         {
             return CompressSubtree16(input, key, chunkCounter, flags, outCvs);
+        }
+
+        // 12..15 chunks (the last may be partial) in one sixteen-lane pass instead of an
+        // eight-chunk pass and a second one for the rest. The chunk CVs come out in the same
+        // order, so the parent reduction below them is unchanged. Below twelve chunks the two
+        // narrower passes measured faster (Zen 4, 2026-10-08: 9-10 chunks 2-4% slower this way,
+        // 14-15 chunks 10% faster).
+        if (HashManyAvx512.IsSupported && input.Length > 11 * Blake3Constants.ChunkLen
+            && input.Length < 16 * Blake3Constants.ChunkLen)
+        {
+            return CompressSubtreeRagged16(input, key, chunkCounter, flags, outCvs);
         }
 #endif
         // Floor of 2: with a scalar-only kernel the leaf case would return a single CV, and a
@@ -792,6 +811,19 @@ internal static class Blake3Tree
     }
 #endif
 
+#if NET8_0_OR_GREATER
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int CompressSubtreeRagged16(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        ulong chunkCounter, uint flags, Span<uint> outCvs)
+    {
+        Span<uint> children = stackalloc uint[16 * 8];
+        HashManyAvx512.HashMany16Ragged(input, key, chunkCounter, flags, children);
+        int chunks = (input.Length + Blake3Constants.ChunkLen - 1) / Blake3Constants.ChunkLen;
+        return CompressParents(children, chunks, key, flags, outCvs);
+    }
+#endif
+
     /// <summary>
     /// Hashes the chunks of a leaf-sized subtree, using the widest kernel each remainder allows.
     /// The final chunk may be partial.
@@ -831,6 +863,23 @@ internal static class Blake3Tree
             n += 8;
         }
 
+        // Whole chunks followed by a partial one: the partial chunk takes a spare lane of the
+        // eight-way kernel instead of running afterwards. Five or more whole chunks use this
+        // kernel anyway; four only pay for it when the partial chunk is long and AVX-512 VL is
+        // present. Three lost 23-33% on Haswell against the pair kernel plus a serial chunk
+        // (2026-10-08).
+        if (HashManyAvx2.IsSupported && remaining.Length < chunkLen * 8 && remaining.Length % chunkLen != 0
+            && (remaining.Length > chunkLen * 5
+                || (HashManyAvx2.HasAvx512Vl && remaining.Length > chunkLen * 4 + 7 * Blake3Constants.BlockLen)))
+        {
+            int fullChunks = remaining.Length / chunkLen;
+            HashManyAvx2.HashManyPartialTail(remaining, fullChunks, key, counter, flags,
+                cvs.Slice(n * 8, 64));
+            remaining = default;
+            counter += (ulong)fullChunks + 1;
+            n += fullChunks + 1;
+        }
+
         if (HashManyAvx2.IsSupported && remaining.Length >= chunkLen * 5)
         {
             int fullChunks = remaining.Length / chunkLen;
@@ -839,6 +888,20 @@ internal static class Blake3Tree
             remaining = remaining.Slice(fullChunks * chunkLen);
             counter += (ulong)fullChunks;
             n += fullChunks;
+        }
+
+        // Three whole chunks and a partial one, or two and a partial one of more than two
+        // blocks: the partial chunk rides in the two-chain kernel instead of running afterwards.
+        // Below three blocks the pair kernel plus the short serial tail is cheaper.
+        if (HashFourAvx2.IsSupported && remaining.Length < chunkLen * 4
+            && remaining.Length > chunkLen * 2 + 2 * Blake3Constants.BlockLen
+            && remaining.Length % chunkLen != 0)
+        {
+            int fullChunks = remaining.Length / chunkLen;
+            HashFourAvx2.HashFourPartial(remaining, fullChunks, key, counter, flags, cvs.Slice(n * 8, (fullChunks + 1) * 8));
+            remaining = default;
+            counter += (ulong)fullChunks + 1;
+            n += fullChunks + 1;
         }
 
         // Three or four whole chunks: two interleaved latency-bound chains, ahead of the
@@ -868,6 +931,21 @@ internal static class Blake3Tree
             n += 4;
         }
 
+        // Two or three whole chunks and a partial one on ARM (not SVE2): the partial chunk takes
+        // a lane of the 4-way NEON kernel instead of running on the scalar path afterwards. With
+        // two whole chunks a lane is wasted, so the partial chunk must be long enough to pay.
+        if (HashManyNeon.IsSupportedWithoutSve2 && remaining.Length < chunkLen * 4
+            && remaining.Length % chunkLen != 0
+            && remaining.Length > chunkLen * 2 + 6 * Blake3Constants.BlockLen)
+        {
+            int fullChunks = remaining.Length / chunkLen;
+            HashManyNeon.HashManyPartialTail(remaining, fullChunks, key, counter, flags,
+                cvs.Slice(n * 8, (fullChunks + 1) * 8));
+            remaining = default;
+            counter += (ulong)fullChunks + 1;
+            n += fullChunks + 1;
+        }
+
         // Exactly three whole chunks on ARM: the 4-way NEON kernel with the spare lane pointed at
         // chunk zero. Three is the only remainder worth padding, because the kernel always pays
         // for four lanes: with the 2026-09-25 kernel three chunks take 0.78 of the scalar time on
@@ -885,6 +963,16 @@ internal static class Blake3Tree
         {
             HashTwoAvx2.HashTwo(remaining, key, counter, flags, cvs.Slice(n * 8, 16));
             remaining = remaining.Slice(chunkLen * 2);
+            counter += 2;
+            n += 2;
+        }
+
+        // One whole chunk and a partial one (the pair above leaves less than two chunks): the
+        // partial chunk rides in the pair kernel's spare lane instead of running afterwards.
+        if (HashTwoAvx2.IsSupported && remaining.Length > chunkLen)
+        {
+            HashTwoAvx2.HashOneAndPartial(remaining, key, counter, flags, cvs.Slice(n * 8, 16));
+            remaining = default;
             counter += 2;
             n += 2;
         }
@@ -927,6 +1015,12 @@ internal static class Blake3Tree
         if (CompressSse41.IsSupported)
         {
             CompressSse41.HashChunkCv(key, chunk, chunkCounter, flags, cv);
+            return;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            CompressScalar.HashChunk(key, chunkCounter, flags, false, chunk, cv);
             return;
         }
 
@@ -1034,5 +1128,18 @@ internal static class Blake3Tree
             result <<= 1;
         }
         return result;
+    }
+
+    /// <summary>Unkeyed one-shot root for four chunks, allowing a partial final chunk.</summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void HashFourChunkRoot32(ReadOnlySpan<byte> input, Span<byte> output)
+    {
+        Span<uint> children = stackalloc uint[32];
+        Span<uint> parents = stackalloc uint[16];
+        HashChunks(input, Blake3Constants.IV, 0, 0, children, interleaveFullBatches: true);
+        HashTwoAvx2.HashParents2(children, Blake3Constants.IV, Blake3Constants.Parent, parents);
+        Blake3Core.CompressCv(Blake3Constants.IV, parents, 0, Blake3Constants.BlockLen,
+            Blake3Constants.Parent | Blake3Constants.Root, MemoryMarshal.Cast<byte, uint>(output));
     }
 }

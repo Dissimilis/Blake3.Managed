@@ -202,12 +202,319 @@ internal static class HashManyAvx512
             }
         }
 
-        // Word-major -> chunk-major. Once per sixteen chunks, so plain scalar moves are fine.
-        uint* words = (uint*)cv;
+        // Word-major -> chunk-major: two 8x8 transposes, one per 256-bit half (chunks 0-7, 8-15).
         ref uint outRef = ref MemoryMarshal.GetReference(cvs);
-        for (int j = 0; j < 16; j++)
-            for (int i = 0; i < 8; i++)
-                Unsafe.Add(ref outRef, j * 8 + i) = words[i * 16 + j];
+        ExportCvs8(cv[0].GetLower(), cv[1].GetLower(), cv[2].GetLower(), cv[3].GetLower(),
+            cv[4].GetLower(), cv[5].GetLower(), cv[6].GetLower(), cv[7].GetLower(), ref outRef);
+        ExportCvs8(cv[0].GetUpper(), cv[1].GetUpper(), cv[2].GetUpper(), cv[3].GetUpper(),
+            cv[4].GetUpper(), cv[5].GetUpper(), cv[6].GetUpper(), cv[7].GetUpper(), ref Unsafe.Add(ref outRef, 64));
+    }
+
+    /// <summary>8 word vectors of 8 chunks each -> 8 chunk-major CVs at <paramref name="dst"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ExportCvs8(Vector256<uint> cv0, Vector256<uint> cv1, Vector256<uint> cv2,
+        Vector256<uint> cv3, Vector256<uint> cv4, Vector256<uint> cv5, Vector256<uint> cv6,
+        Vector256<uint> cv7, ref uint dst)
+    {
+        var t0 = Avx2.UnpackLow(cv0, cv1);
+        var t1 = Avx2.UnpackHigh(cv0, cv1);
+        var t2 = Avx2.UnpackLow(cv2, cv3);
+        var t3 = Avx2.UnpackHigh(cv2, cv3);
+        var t4 = Avx2.UnpackLow(cv4, cv5);
+        var t5 = Avx2.UnpackHigh(cv4, cv5);
+        var t6 = Avx2.UnpackLow(cv6, cv7);
+        var t7 = Avx2.UnpackHigh(cv6, cv7);
+
+        var u0 = Avx2.UnpackLow(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u1 = Avx2.UnpackHigh(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u2 = Avx2.UnpackLow(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u3 = Avx2.UnpackHigh(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u4 = Avx2.UnpackLow(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u5 = Avx2.UnpackHigh(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u6 = Avx2.UnpackLow(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+        var u7 = Avx2.UnpackHigh(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x20), ref dst);
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x20), ref dst, 8);
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x20), ref dst, 16);
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x20), ref dst, 24);
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x31), ref dst, 32);
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x31), ref dst, 40);
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x31), ref dst, 48);
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x31), ref dst, 56);
+    }
+
+    /// <summary>
+    /// <see cref="HashMany16"/> for 9..15 chunks, the last possibly partial: <paramref name="cvs"/>
+    /// receives 128 words, of which the first ceil(length / 1 KiB) CVs are meaningful.
+    /// </summary>
+    /// <remarks>
+    /// Without it an input of 9-15 chunks is an eight-chunk pass followed by a second pass for the
+    /// rest. Lanes past the input reread chunk 0; a partial last chunk reads a zero-padded copy of
+    /// its final block from then on, takes its length and flags through a lane mask, and has its
+    /// CV latched after that block.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashMany16Ragged(ReadOnlySpan<byte> chunks, ReadOnlySpan<uint> key,
+        ulong counter, uint flags, Span<uint> cvs)
+    {
+        int fullChunks = chunks.Length / ChunkLen;
+        int partialLen = chunks.Length - fullChunks * ChunkLen;
+        if (fullChunks < 8 || chunks.Length >= 16 * ChunkLen || (fullChunks == 8 && partialLen == 0))
+            throw new ArgumentException("Need 9..15 chunks.", nameof(chunks));
+        _ = cvs[16 * 8 - 1];
+        int lastBlock = partialLen == 0 ? 15 : (partialLen - 1) >> 6;
+        int lastLen = partialLen == 0 ? 64 : partialLen - (lastBlock << 6);
+
+        byte* padded = stackalloc byte[64];
+        new Span<byte>(padded, 64).Clear();
+        if (partialLen != 0)
+            chunks.Slice(fullChunks * ChunkLen + (lastBlock << 6), lastLen).CopyTo(new Span<byte>(padded, 64));
+        byte** rows = stackalloc byte*[16];
+        Vector512<uint>* latched = stackalloc Vector512<uint>[8];
+        var laneMask = Avx512F.CompareEqual(Vector512.Create(0u, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            Vector512.Create((uint)fullChunks));
+
+        byte* raw = stackalloc byte[26 * 64 + 64];
+        Vector512<uint>* m = (Vector512<uint>*)(((nuint)raw + 63) & ~(nuint)63); // 16 message words
+        Vector512<uint>* cv = m + 16;                                           // 8 chaining values
+        Vector512<uint>* ctr = m + 24;                                          // counter low, high
+
+        for (int i = 0; i < 8; i++) cv[i] = Vector512.Create(key[i]);
+        var lane = Vector512.Create(0ul, 1, 2, 3, 4, 5, 6, 7);
+        var lo8 = Avx512F.Add(Vector512.Create(counter), lane);
+        var hi8 = Avx512F.Add(Vector512.Create(counter + 8), lane);
+        ctr[0] = Avx512F.PermuteVar16x32x2(lo8.AsUInt32(),
+            Vector512.Create(0u, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30), hi8.AsUInt32());
+        ctr[1] = Avx512F.PermuteVar16x32x2(lo8.AsUInt32(),
+            Vector512.Create(1u, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31), hi8.AsUInt32());
+
+        fixed (byte* chunksPtr = chunks)
+        {
+            for (int blk = 0; blk < 16; blk++)
+            {
+                for (int i = 0; i < 16; i++)
+                {
+                    rows[i] = i < fullChunks ? chunksPtr + i * ChunkLen + blk * 64
+                        : i == fullChunks && partialLen != 0
+                            ? (blk < lastBlock ? chunksPtr + fullChunks * ChunkLen + blk * 64 : padded)
+                            : chunksPtr + blk * 64;
+                }
+                Transpose16Rows(rows, m);
+                uint partLen = blk < lastBlock ? 64u : (uint)lastLen;
+                uint partFlags = flags | (blk == 0 ? Blake3Constants.ChunkStart : 0u)
+                                       | (blk < lastBlock ? 0u : Blake3Constants.ChunkEnd);
+                uint blockFlags = flags;
+                if (blk == 0) blockFlags |= Blake3Constants.ChunkStart;
+                if (blk == 15) blockFlags |= Blake3Constants.ChunkEnd;
+
+                Vector512<uint> s0 = cv[0], s1 = cv[1], s2 = cv[2], s3 = cv[3];
+                Vector512<uint> s4 = cv[4], s5 = cv[5], s6 = cv[6], s7 = cv[7];
+                Vector512<uint> s8 = Vector512.Create(Blake3Constants.Iv0), s9 = Vector512.Create(Blake3Constants.Iv1);
+                Vector512<uint> s10 = Vector512.Create(Blake3Constants.Iv2), s11 = Vector512.Create(Blake3Constants.Iv3);
+                Vector512<uint> s12 = ctr[0], s13 = ctr[1];
+                Vector512<uint> s14 = Vector512.ConditionalSelect(laneMask, Vector512.Create(partLen), Vector512.Create((uint)Blake3Constants.BlockLen));
+                Vector512<uint> s15 = Vector512.ConditionalSelect(laneMask, Vector512.Create(partFlags), Vector512.Create(blockFlags));
+
+                // Round 0
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[0]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[2]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[4]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[6]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[1]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[3]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[5]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[7]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[8]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[10]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[12]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[14]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[9]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[11]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[13]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[15]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 1
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[2]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[3]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[7]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[4]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[6]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[10]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[0]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[13]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[1]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[12]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[9]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[15]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[11]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[5]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[14]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[8]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 2
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[3]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[10]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[13]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[7]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[4]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[12]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[2]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[14]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[6]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[9]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[11]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[8]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[5]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[0]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[15]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[1]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 3
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[10]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[12]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[14]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[13]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[7]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[9]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[3]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[15]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[4]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[11]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[5]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[1]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[0]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[2]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[8]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[6]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 4
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[12]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[9]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[15]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[14]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[13]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[11]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[10]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[8]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[7]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[5]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[0]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[6]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[2]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[3]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[1]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[4]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 5
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[9]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[11]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[8]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[15]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[14]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[5]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[12]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[1]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[13]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[0]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[2]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[4]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[3]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[10]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[6]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[7]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+                // Round 6
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[11]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[5]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[1]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[8]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 16); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 16);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 12); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[15]), s4); s1 = Avx512F.Add(Avx512F.Add(s1, m[0]), s5); s2 = Avx512F.Add(Avx512F.Add(s2, m[9]), s6); s3 = Avx512F.Add(Avx512F.Add(s3, m[6]), s7);
+                s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s0), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s1), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s2), 8); s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s3), 8);
+                s8 = Avx512F.Add(s8, s12); s9 = Avx512F.Add(s9, s13); s10 = Avx512F.Add(s10, s14); s11 = Avx512F.Add(s11, s15);
+                s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s8), 7); s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s9), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s10), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s11), 7);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[14]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[2]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[3]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[7]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 16); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 16); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 16); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 16);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 12); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 12); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 12); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 12);
+                s0 = Avx512F.Add(Avx512F.Add(s0, m[10]), s5); s1 = Avx512F.Add(Avx512F.Add(s1, m[12]), s6); s2 = Avx512F.Add(Avx512F.Add(s2, m[4]), s7); s3 = Avx512F.Add(Avx512F.Add(s3, m[13]), s4);
+                s15 = Avx512F.RotateRight(Avx512F.Xor(s15, s0), 8); s12 = Avx512F.RotateRight(Avx512F.Xor(s12, s1), 8); s13 = Avx512F.RotateRight(Avx512F.Xor(s13, s2), 8); s14 = Avx512F.RotateRight(Avx512F.Xor(s14, s3), 8);
+                s10 = Avx512F.Add(s10, s15); s11 = Avx512F.Add(s11, s12); s8 = Avx512F.Add(s8, s13); s9 = Avx512F.Add(s9, s14);
+                s5 = Avx512F.RotateRight(Avx512F.Xor(s5, s10), 7); s6 = Avx512F.RotateRight(Avx512F.Xor(s6, s11), 7); s7 = Avx512F.RotateRight(Avx512F.Xor(s7, s8), 7); s4 = Avx512F.RotateRight(Avx512F.Xor(s4, s9), 7);
+
+                cv[0] = Avx512F.Xor(s0, s8); cv[1] = Avx512F.Xor(s1, s9);
+                cv[2] = Avx512F.Xor(s2, s10); cv[3] = Avx512F.Xor(s3, s11);
+                cv[4] = Avx512F.Xor(s4, s12); cv[5] = Avx512F.Xor(s5, s13);
+                cv[6] = Avx512F.Xor(s6, s14); cv[7] = Avx512F.Xor(s7, s15);
+
+                if (blk == lastBlock)
+                {
+                    for (int i = 0; i < 8; i++) latched[i] = cv[i];
+                }
+            }
+        }
+
+        if (partialLen != 0)
+        {
+            for (int i = 0; i < 8; i++) cv[i] = Vector512.ConditionalSelect(laneMask, latched[i], cv[i]);
+        }
+
+        // Word-major -> chunk-major: two 8x8 transposes, one per 256-bit half (chunks 0-7, 8-15).
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        ExportCvs8(cv[0].GetLower(), cv[1].GetLower(), cv[2].GetLower(), cv[3].GetLower(),
+            cv[4].GetLower(), cv[5].GetLower(), cv[6].GetLower(), cv[7].GetLower(), ref outRef);
+        ExportCvs8(cv[0].GetUpper(), cv[1].GetUpper(), cv[2].GetUpper(), cv[3].GetUpper(),
+            cv[4].GetUpper(), cv[5].GetUpper(), cv[6].GetUpper(), cv[7].GetUpper(), ref Unsafe.Add(ref outRef, 64));
+    }
+
+    /// <summary><see cref="Transpose16"/> with one row pointer per lane.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static unsafe void Transpose16Rows(byte** rows, Vector512<uint>* m)
+    {
+        var r0 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[0]);
+        var r1 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[1]);
+        var r2 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[2]);
+        var r3 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[3]);
+        var r4 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[4]);
+        var r5 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[5]);
+        var r6 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[6]);
+        var r7 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[7]);
+        var r8 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[8]);
+        var r9 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[9]);
+        var r10 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[10]);
+        var r11 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[11]);
+        var r12 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[12]);
+        var r13 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[13]);
+        var r14 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[14]);
+        var r15 = Unsafe.ReadUnaligned<Vector512<uint>>(rows[15]);
+
+        // 32-bit interleave within 128-bit lanes.
+        var a0 = Avx512F.UnpackLow(r0, r1); var a1 = Avx512F.UnpackHigh(r0, r1);
+        var a2 = Avx512F.UnpackLow(r2, r3); var a3 = Avx512F.UnpackHigh(r2, r3);
+        var a4 = Avx512F.UnpackLow(r4, r5); var a5 = Avx512F.UnpackHigh(r4, r5);
+        var a6 = Avx512F.UnpackLow(r6, r7); var a7 = Avx512F.UnpackHigh(r6, r7);
+        var a8 = Avx512F.UnpackLow(r8, r9); var a9 = Avx512F.UnpackHigh(r8, r9);
+        var a10 = Avx512F.UnpackLow(r10, r11); var a11 = Avx512F.UnpackHigh(r10, r11);
+        var a12 = Avx512F.UnpackLow(r12, r13); var a13 = Avx512F.UnpackHigh(r12, r13);
+        var a14 = Avx512F.UnpackLow(r14, r15); var a15 = Avx512F.UnpackHigh(r14, r15);
+
+        // 64-bit interleave: b[4g + k], 128-bit lane q = word 4q + k of chunks 4g..4g+3.
+        var b0 = Avx512F.UnpackLow(a0.AsUInt64(), a2.AsUInt64()).AsUInt32();
+        var b1 = Avx512F.UnpackHigh(a0.AsUInt64(), a2.AsUInt64()).AsUInt32();
+        var b2 = Avx512F.UnpackLow(a1.AsUInt64(), a3.AsUInt64()).AsUInt32();
+        var b3 = Avx512F.UnpackHigh(a1.AsUInt64(), a3.AsUInt64()).AsUInt32();
+        var b4 = Avx512F.UnpackLow(a4.AsUInt64(), a6.AsUInt64()).AsUInt32();
+        var b5 = Avx512F.UnpackHigh(a4.AsUInt64(), a6.AsUInt64()).AsUInt32();
+        var b6 = Avx512F.UnpackLow(a5.AsUInt64(), a7.AsUInt64()).AsUInt32();
+        var b7 = Avx512F.UnpackHigh(a5.AsUInt64(), a7.AsUInt64()).AsUInt32();
+        var b8 = Avx512F.UnpackLow(a8.AsUInt64(), a10.AsUInt64()).AsUInt32();
+        var b9 = Avx512F.UnpackHigh(a8.AsUInt64(), a10.AsUInt64()).AsUInt32();
+        var b10 = Avx512F.UnpackLow(a9.AsUInt64(), a11.AsUInt64()).AsUInt32();
+        var b11 = Avx512F.UnpackHigh(a9.AsUInt64(), a11.AsUInt64()).AsUInt32();
+        var b12 = Avx512F.UnpackLow(a12.AsUInt64(), a14.AsUInt64()).AsUInt32();
+        var b13 = Avx512F.UnpackHigh(a12.AsUInt64(), a14.AsUInt64()).AsUInt32();
+        var b14 = Avx512F.UnpackLow(a13.AsUInt64(), a15.AsUInt64()).AsUInt32();
+        var b15 = Avx512F.UnpackHigh(a13.AsUInt64(), a15.AsUInt64()).AsUInt32();
+
+        Lanes(b0, b4, b8, b12, m, 0);
+        Lanes(b1, b5, b9, b13, m, 1);
+        Lanes(b2, b6, b10, b14, m, 2);
+        Lanes(b3, b7, b11, b15, m, 3);
     }
 
     /// <summary>

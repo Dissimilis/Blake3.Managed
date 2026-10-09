@@ -215,6 +215,94 @@ internal static class CompressScalar
         chainingValue[7] = s7 ^ s15;
     }
 
+    /// <summary>
+    /// Hashes a whole 0..1024-byte chunk to its chaining value -- or, with
+    /// <paramref name="root"/>, to its 32-byte root digest -- keeping the chaining value in
+    /// registers from block to block. Little-endian only.
+    /// </summary>
+    /// <remarks>
+    /// The per-block path calls <see cref="CompressChainingValue"/> once per block, loading the
+    /// chaining value from memory and storing it back each time. The round body is inlined once
+    /// here, for every block including the last, so the method stays one copy of the rounds.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void HashChunk(ReadOnlySpan<uint> key, ulong counter, uint flags, bool root,
+                                 ReadOnlySpan<byte> input, Span<uint> output)
+        => HashChunkCore(key, counter, flags, root, prefixOnly: false, input, output);
+
+    /// <summary>
+    /// Compresses every block of a 0..1024-byte chunk except the last into
+    /// <paramref name="output"/>, and returns the number of bytes consumed, leaving 0..64 bytes
+    /// as the final block (for callers that need its whole <c>Output</c>, as extended output does).
+    /// </summary>
+    public static int HashChunkPrefix(ReadOnlySpan<uint> key, ulong counter, uint flags,
+                                      ReadOnlySpan<byte> input, Span<uint> output)
+        => HashChunkCore(key, counter, flags, root: false, prefixOnly: true, input, output);
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static int HashChunkCore(ReadOnlySpan<uint> key, ulong counter, uint flags, bool root,
+                                     bool prefixOnly, ReadOnlySpan<byte> input, Span<uint> output)
+    {
+        _ = key[7];
+        _ = output[7];
+        uint c0 = key[0], c1 = key[1], c2 = key[2], c3 = key[3];
+        uint c4 = key[4], c5 = key[5], c6 = key[6], c7 = key[7];
+        uint counterLo = (uint)counter, counterHi = (uint)(counter >> 32);
+
+        Span<uint> padded = stackalloc uint[16];
+        int pos = 0;
+        uint blockFlags = flags | Blake3Constants.ChunkStart;
+        while (true)
+        {
+            int remaining = input.Length - pos;
+            bool last = remaining <= Blake3Constants.BlockLen;
+            scoped ReadOnlySpan<uint> m;
+            uint blockLen;
+            if (!last)
+            {
+                m = MemoryMarshal.Cast<byte, uint>(input.Slice(pos, Blake3Constants.BlockLen));
+                blockLen = Blake3Constants.BlockLen;
+            }
+            else
+            {
+                if (prefixOnly) break;
+                blockFlags |= Blake3Constants.ChunkEnd | (root ? Blake3Constants.Root : 0u);
+                blockLen = (uint)remaining;
+                if (remaining == Blake3Constants.BlockLen)
+                {
+                    m = MemoryMarshal.Cast<byte, uint>(input.Slice(pos, Blake3Constants.BlockLen));
+                }
+                else
+                {
+                    // Inline stores rather than Span.Clear/CopyTo, which are out-of-line calls.
+                    Blake3Core.ZeroBlock(MemoryMarshal.AsBytes(padded));
+                    Blake3Core.CopyUpTo64(input.Slice(pos), MemoryMarshal.AsBytes(padded));
+                    m = padded;
+                }
+            }
+
+            uint s0 = c0, s1 = c1, s2 = c2, s3 = c3, s4 = c4, s5 = c5, s6 = c6, s7 = c7;
+            uint s8 = Blake3Constants.Iv0, s9 = Blake3Constants.Iv1;
+            uint s10 = Blake3Constants.Iv2, s11 = Blake3Constants.Iv3;
+            uint s12 = counterLo, s13 = counterHi, s14 = blockLen, s15 = blockFlags;
+
+            Rounds(ref s0, ref s1, ref s2, ref s3, ref s4, ref s5, ref s6, ref s7,
+                   ref s8, ref s9, ref s10, ref s11, ref s12, ref s13, ref s14, ref s15, m);
+
+            c0 = s0 ^ s8; c1 = s1 ^ s9; c2 = s2 ^ s10; c3 = s3 ^ s11;
+            c4 = s4 ^ s12; c5 = s5 ^ s13; c6 = s6 ^ s14; c7 = s7 ^ s15;
+
+            if (last) break;
+            pos += Blake3Constants.BlockLen;
+            blockFlags = flags;
+        }
+
+        output[0] = c0; output[1] = c1; output[2] = c2; output[3] = c3;
+        output[4] = c4; output[5] = c5; output[6] = c6; output[7] = c7;
+        return pos;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void BlockWordsFromBytes(ReadOnlySpan<byte> block, Span<uint> words)
     {

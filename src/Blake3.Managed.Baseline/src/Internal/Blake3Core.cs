@@ -541,6 +541,12 @@ internal static class Blake3Core
                 return;
             }
 #endif
+            if (OutputManyNeon.IsSupported)
+            {
+                RootOutputBytesAtNeon(seekOffset, output);
+                return;
+            }
+
             int outputLen = output.Length;
             int pos = 0;
             ulong blockCounter = seekOffset / 64;
@@ -723,6 +729,63 @@ internal static class Blake3Core
             }
         }
 #endif
+
+        /// <summary>
+        /// <see cref="RootOutputBytesAt"/> for NEON without SVE2, four blocks per kernel call.
+        /// Forwarded to from the top of that method, like the SVE2 form.
+        /// </summary>
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void RootOutputBytesAtNeon(ulong seekOffset, Span<byte> output)
+        {
+            int outputLen = output.Length;
+            int pos = 0;
+            ulong blockCounter = seekOffset / 64;
+            int byteOffset = (int)(seekOffset % 64);
+
+            Span<uint> state = stackalloc uint[16];
+
+            if (byteOffset != 0 && outputLen > 0)
+            {
+                CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags | Blake3Constants.Root, state);
+                int take = Math.Min(64 - byteOffset, outputLen);
+                MemoryMarshal.AsBytes(state).Slice(byteOffset, take).CopyTo(output);
+                pos = take;
+                blockCounter++;
+            }
+
+            if (outputLen - pos >= 256)
+            {
+                int batchBytes = (outputLen - pos) & ~255;
+                OutputManyNeon.HashOutput4(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags, output.Slice(pos, batchBytes));
+                pos += batchBytes;
+                blockCounter += (ulong)(batchBytes / 64);
+            }
+
+            // Three blocks still needed: one batch into scratch. Two stay scalar, where a
+            // four-lane batch costs about as much as or more than two single blocks.
+            if (outputLen - pos > 2 * Blake3Constants.BlockLen)
+            {
+                Span<byte> batch = stackalloc byte[256];
+                OutputManyNeon.HashOutput4(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags, batch);
+                int take = outputLen - pos;
+                batch.Slice(0, take).CopyTo(output.Slice(pos));
+                pos += take;
+            }
+
+            while (pos < outputLen)
+            {
+                CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags | Blake3Constants.Root, state);
+                int toCopy = Math.Min(64, outputLen - pos);
+                MemoryMarshal.AsBytes(state).Slice(0, toCopy).CopyTo(output.Slice(pos));
+                pos += toCopy;
+                blockCounter++;
+            }
+        }
 
         /// <summary>
         /// Emits 2..7 root output blocks with one eight-lane batch, keeping the prefix the
@@ -1139,8 +1202,9 @@ internal static class Blake3Core
 
         /// <summary>
         /// As <see cref="HashAlignedSubtree"/> but in units of four chunks, for the NEON tier.
-        /// The chunk counter must be a multiple of 4 and <paramref name="remaining"/> longer than
-        /// four chunks.
+        /// The chunk counter must be a multiple of 4 and <paramref name="remaining"/> at least
+        /// four chunks; a subtree that ends exactly at the end of the input is finished by
+        /// <see cref="FinishAlignedSubtree"/>, as on x86.
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         private int HashAlignedSubtreeNeon(ReadOnlySpan<byte> remaining, Span<uint> batchCvs)
@@ -1150,7 +1214,7 @@ internal static class Blake3Core
             int treeChunks = 4;
             while (treeChunks < subtreeChunks
                    && (startCounter & (ulong)(2 * treeChunks - 1)) == 0
-                   && remaining.Length > 2 * treeChunks * Blake3Constants.ChunkLen)
+                   && remaining.Length >= 2 * treeChunks * Blake3Constants.ChunkLen)
             {
                 treeChunks *= 2;
             }
@@ -1170,11 +1234,7 @@ internal static class Blake3Core
                     batchCvs.Slice(b * 32, 32));
             }
 
-            ReduceCvs(batchCvs, treeChunks, KeySpan, _flags);
-            AddChunkCv(batchCvs.Slice(0, 8), (startCounter - _chunkBase) / (ulong)treeChunks + 1);
-
-            _chunkState = new ChunkState(KeySpan, startCounter + (ulong)treeChunks, _flags);
-            return treeChunks * Blake3Constants.ChunkLen;
+            return FinishAlignedSubtree(remaining.Length, batchCvs, startCounter, treeChunks);
         }
 
 #if NET10_0_OR_GREATER
@@ -1207,11 +1267,7 @@ internal static class Blake3Core
                     4, KeySpan, startCounter, _flags, batchCvs.Slice(0, 32));
             }
 
-            ReduceCvs(batchCvs, treeChunks, KeySpan, _flags);
-            AddChunkCv(batchCvs.Slice(0, 8), (startCounter - _chunkBase) / (ulong)treeChunks + 1);
-
-            _chunkState = new ChunkState(KeySpan, startCounter + (ulong)treeChunks, _flags);
-            return treeChunks * Blake3Constants.ChunkLen;
+            return FinishAlignedSubtree(remaining.Length, batchCvs, startCounter, treeChunks);
         }
 #endif
 
@@ -1263,7 +1319,7 @@ internal static class Blake3Core
                 // one at a time and pays three scalar parent compressions per four chunks.
                 if (HashManyNeon.IsSupported && _chunkState.Len == 0
                     && (_chunkState.ChunkCounter & 3) == 0
-                    && remaining.Length > 4 * Blake3Constants.ChunkLen)
+                    && remaining.Length >= 4 * Blake3Constants.ChunkLen)
                 {
                     int consumed = HashAlignedSubtreeNeon(remaining, batchCvs);
                     remaining = remaining.Slice(consumed);

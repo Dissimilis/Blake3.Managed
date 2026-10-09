@@ -16,23 +16,12 @@ namespace Blake3.Managed.Internal;
 internal static class HashFourAvx2
 {
     /// <summary>
-    /// Two chains need about twice the registers of one. With only sixteen 256-bit registers
-    /// (AVX2 without AVX-512 VL) they would spill, so the kernel requires the wider file.
+    /// Two chains need about twice the registers of one, so with only sixteen 256-bit registers
+    /// (AVX2 without AVX-512 VL) they spill -- and still win: on Haswell four chunks took 0.64
+    /// of the time of the 128-bit four-way kernel, three chunks 0.90 of a pair plus a single
+    /// chunk (2026-10-08). The kernel used to require AVX-512 VL on that expectation, unmeasured.
     /// </summary>
-    internal static bool IsSupported =>
-#if NET8_0_OR_GREATER
-        Avx2.IsSupported && Avx512F.VL.IsSupported;
-#else
-        false;
-#endif
-
-    private static readonly Vector256<byte> Rot16Mask256 = Vector256.Create(
-        (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
-
-    private static readonly Vector256<byte> Rot8Mask256 = Vector256.Create(
-        (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12,
-        1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
+    internal static bool IsSupported => Avx2.IsSupported;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> RotateRight16(Vector256<uint> v)
@@ -41,7 +30,7 @@ internal static class HashFourAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 16);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot16Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -61,7 +50,7 @@ internal static class HashFourAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 8);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot8Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12, 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -143,6 +132,146 @@ internal static class HashFourAvx2
         if (numChunks == 4)
             VectorCompat.Store(Avx2.Permute2x128(dv0, dv1, 0x31), ref destination, 24);
     }
+
+    /// <summary>
+    /// Hashes two or three full chunks and the partial chunk after them, writing
+    /// <paramref name="fullChunks"/> + 1 chaining values to <paramref name="cvs"/>.
+    /// </summary>
+    /// <remarks>
+    /// The partial chunk rides in the second chain's spare lane (three full chunks) or fills the
+    /// second chain (two full chunks) instead of being hashed afterwards, one block at a time.
+    /// Once its final block is done its chaining value is latched, and the lane recompresses
+    /// that padded block until the full chunks finish; those results are discarded.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
+    internal static void HashFourPartial(ReadOnlySpan<byte> input, int fullChunks, ReadOnlySpan<uint> key,
+        ulong counter, uint flags, Span<uint> cvs, Span<uint> prefixCv = default)
+    {
+        if (fullChunks != 2 && fullChunks != 3) throw new ArgumentOutOfRangeException(nameof(fullChunks));
+        int partialLen = input.Length - fullChunks * Blake3Constants.ChunkLen;
+        if (partialLen <= 0 || partialLen >= Blake3Constants.ChunkLen) throw new ArgumentException("Need a partial final chunk.", nameof(input));
+        if (cvs.Length < (fullChunks + 1) * 8) throw new ArgumentException("Output too short.", nameof(cvs));
+
+        int lastBlock = (partialLen - 1) >> 6;
+        int lastLen = partialLen - (lastBlock << 6);
+
+        Span<byte> padded = stackalloc byte[Blake3Constants.BlockLen];
+        padded.Clear();
+        input.Slice(fullChunks * Blake3Constants.ChunkLen + (lastBlock << 6), lastLen).CopyTo(padded);
+
+        ref byte source = ref MemoryMarshal.GetReference(input);
+        ref byte partial = ref Unsafe.Add(ref source, fullChunks * Blake3Constants.ChunkLen);
+        ref byte pad = ref MemoryMarshal.GetReference(padded);
+        ref uint keyRef = ref MemoryMarshal.GetReference(key);
+        var key0 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.As<uint, byte>(ref keyRef));
+        var key1 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref keyRef, 4)));
+        var cv0 = Vector256.Create(key0, key0);
+        var cv1 = Vector256.Create(key1, key1);
+        var dv0 = cv0;
+        var dv1 = cv1;
+        var iv = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        var ivRow = Vector256.Create(iv, iv);
+        Vector128<uint> partialCv0 = default, partialCv1 = default;
+
+        // Chain B's low lane: chunk 2 (three full chunks) or the partial chunk itself (two).
+        bool lowIsPartial = fullChunks == 2;
+        ulong counterB0 = counter + 2;
+        ulong counterP = counter + (ulong)fullChunks;
+        ref byte sourceB = ref Unsafe.Add(ref source, 2 * Blake3Constants.ChunkLen);
+
+        for (int block = 0; block < 16; block++)
+        {
+            uint blockFlags = flags | (block == 0 ? Blake3Constants.ChunkStart : 0u)
+                                    | (block == 15 ? Blake3Constants.ChunkEnd : 0u);
+            uint partFlags;
+            uint partLen;
+            ref byte partSource = ref pad;
+            if (block < lastBlock)
+            {
+                partFlags = flags | (block == 0 ? Blake3Constants.ChunkStart : 0u);
+                partLen = 64;
+                partSource = ref Unsafe.Add(ref partial, block << 6);
+            }
+            else
+            {
+                partFlags = flags | (lastBlock == 0 ? Blake3Constants.ChunkStart : 0u)
+                                  | Blake3Constants.ChunkEnd;
+                partLen = (uint)lastLen;
+            }
+
+            var r0 = cv0;
+            var r1 = cv1;
+            var r2 = ivRow;
+            var r3 = Vector256.Create((uint)counter, (uint)(counter >> 32), 64u, blockFlags,
+                (uint)(counter + 1), (uint)((counter + 1) >> 32), 64u, blockFlags);
+            var s0 = dv0;
+            var s1 = dv1;
+            var s2 = ivRow;
+            Vector256<uint> s3;
+            int offset = block * 64;
+            Vector256<uint> n0, n1, n2, n3;
+            if (lowIsPartial)
+            {
+                s3 = Vector256.Create((uint)counterP, (uint)(counterP >> 32), partLen, partFlags,
+                    (uint)counterP, (uint)(counterP >> 32), partLen, partFlags);
+                n0 = LoadPair(ref partSource, 0, 0);
+                n1 = LoadPair(ref partSource, 16, 0);
+                n2 = LoadPair(ref partSource, 32, 0);
+                n3 = LoadPair(ref partSource, 48, 0);
+            }
+            else
+            {
+                s3 = Vector256.Create((uint)counterB0, (uint)(counterB0 >> 32), 64u, blockFlags,
+                    (uint)counterP, (uint)(counterP >> 32), partLen, partFlags);
+                n0 = LoadPair(ref Unsafe.Add(ref sourceB, offset), ref partSource, 0);
+                n1 = LoadPair(ref Unsafe.Add(ref sourceB, offset), ref partSource, 16);
+                n2 = LoadPair(ref Unsafe.Add(ref sourceB, offset), ref partSource, 32);
+                n3 = LoadPair(ref Unsafe.Add(ref sourceB, offset), ref partSource, 48);
+            }
+
+            DoRoundsShuffle2(ref r0, ref r1, ref r2, ref r3,
+                LoadPair(ref source, offset, Blake3Constants.ChunkLen),
+                LoadPair(ref source, offset + 16, Blake3Constants.ChunkLen),
+                LoadPair(ref source, offset + 32, Blake3Constants.ChunkLen),
+                LoadPair(ref source, offset + 48, Blake3Constants.ChunkLen),
+                ref s0, ref s1, ref s2, ref s3, n0, n1, n2, n3);
+            cv0 = Avx2.Xor(r0, r2);
+            cv1 = Avx2.Xor(r1, r3);
+            dv0 = Avx2.Xor(s0, s2);
+            dv1 = Avx2.Xor(s1, s3);
+            if (block == lastBlock)
+            {
+                partialCv0 = dv0.GetUpper();
+                partialCv1 = dv1.GetUpper();
+            }
+            else if (block == lastBlock - 1 && !prefixCv.IsEmpty)
+            {
+                // The partial chunk's state before its final block, for an incremental Update.
+                ref uint pre = ref MemoryMarshal.GetReference(prefixCv);
+                VectorCompat.Store(dv0.GetUpper(), ref pre);
+                VectorCompat.Store(dv1.GetUpper(), ref pre, 4);
+            }
+        }
+
+        ref uint destination = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x20), ref destination);
+        VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x31), ref destination, 8);
+        if (!lowIsPartial)
+        {
+            VectorCompat.Store(dv0.GetLower(), ref destination, 16);
+            VectorCompat.Store(dv1.GetLower(), ref destination, 20);
+        }
+        int p = fullChunks * 8;
+        VectorCompat.Store(partialCv0, ref destination, (nuint)p);
+        VectorCompat.Store(partialCv1, ref destination, (nuint)(p + 4));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<uint> LoadPair(ref byte low, ref byte high, int offset) => Vector256.Create(
+        Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref low, offset)),
+        Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref high, offset)));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> LoadPair(ref byte source, int offset, int secondStride) => Vector256.Create(

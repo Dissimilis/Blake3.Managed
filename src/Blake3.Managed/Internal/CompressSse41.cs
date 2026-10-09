@@ -13,12 +13,6 @@ internal static class CompressSse41
 {
     public static bool IsSupported => Sse2.IsSupported && Ssse3.IsSupported;
 
-    private static readonly Vector128<byte> Rot16Mask = Vector128.Create(
-        (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
-
-    private static readonly Vector128<byte> Rot8Mask = Vector128.Create(
-        (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<uint> RotateRight16(Vector128<uint> v)
     {
@@ -26,7 +20,7 @@ internal static class CompressSse41
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 16);
 #endif
-        return Ssse3.Shuffle(v.AsByte(), Rot16Mask).AsUInt32();
+        return Ssse3.Shuffle(v.AsByte(), Vector128.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -46,7 +40,7 @@ internal static class CompressSse41
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 8);
 #endif
-        return Ssse3.Shuffle(v.AsByte(), Rot8Mask).AsUInt32();
+        return Ssse3.Shuffle(v.AsByte(), Vector128.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -175,6 +169,57 @@ internal static class CompressSse41
     }
 
     /// <summary>
+    /// Root hash of a 129..192 byte input in default unkeyed mode: exactly three blocks, every
+    /// flag a compile-time constant, as <see cref="CompressRootIvTwoBlocks"/> does for two.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void CompressRootIvThreeBlocks(ReadOnlySpan<byte> input, Span<uint> chainingValue)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        ref byte src = ref MemoryMarshal.GetReference(input);
+
+        var r0 = ivRow;
+        var r1 = Vector128.Create(Blake3Constants.Iv4, Blake3Constants.Iv5,
+            Blake3Constants.Iv6, Blake3Constants.Iv7);
+        var r2 = ivRow;
+        var r3 = Vector128.Create(0u, 0u, (uint)Blake3Constants.BlockLen, Blake3Constants.ChunkStart);
+        DoRoundsShuffle(ref r0, ref r1, ref r2, ref r3,
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref src),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 16)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 32)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 48)));
+        var cv0 = Sse2.Xor(r0, r2);
+        var cv1 = Sse2.Xor(r1, r3);
+
+        var s0 = cv0;
+        var s1 = cv1;
+        var s2 = ivRow;
+        var s3 = Vector128.Create(0u, 0u, (uint)Blake3Constants.BlockLen, 0u);
+        DoRoundsShuffle(ref s0, ref s1, ref s2, ref s3,
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 64)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 80)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 96)),
+            Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref src, 112)));
+        cv0 = Sse2.Xor(s0, s2);
+        cv1 = Sse2.Xor(s1, s3);
+
+        int lastLen = input.Length - 2 * Blake3Constants.BlockLen;
+        LoadPaddedBlock(input.Slice(2 * Blake3Constants.BlockLen), out var m0, out var m1,
+            out var m2, out var m3);
+        var f0 = cv0;
+        var f1 = cv1;
+        var f2 = ivRow;
+        var f3 = Vector128.Create(0u, 0u, (uint)lastLen, Blake3Constants.ChunkEnd | Blake3Constants.Root);
+        DoRoundsShuffle(ref f0, ref f1, ref f2, ref f3, m0, m1, m2, m3);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(chainingValue);
+        VectorCompat.Store(Sse2.Xor(f0, f2), ref outRef);
+        VectorCompat.Store(Sse2.Xor(f1, f3), ref outRef, 4);
+    }
+
+    /// <summary>
     /// Hashes a whole chunk (0..1024 bytes) in default unkeyed mode, producing the 32-byte digest.
     /// </summary>
     /// <remarks>
@@ -244,6 +289,134 @@ internal static class CompressSse41
         var f1 = cv1;
         var f2 = ivRow;
         var f3 = Vector128.Create(0u, 0u, (uint)lastLen, lastFlags);
+
+        DoRoundsShuffle(ref f0, ref f1, ref f2, ref f3, m0, m1, m2, m3);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(output);
+        VectorCompat.Store(Sse2.Xor(f0, f2), ref outRef);
+        VectorCompat.Store(Sse2.Xor(f1, f3), ref outRef, 4);
+    }
+
+    /// <summary>
+    /// Compresses every block of a 0..1024-byte default unkeyed chunk except the last into
+    /// <paramref name="cv"/>, and returns the number of bytes consumed (a multiple of 64,
+    /// leaving 0..64 bytes as the final block).
+    /// </summary>
+    /// <remarks>
+    /// The front half of <see cref="HashChunkRoot32Iv"/>, for callers that need the final
+    /// block's whole <c>Output</c> state (extended output) rather than the 32-byte root.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static int HashChunkPrefixIv(ReadOnlySpan<byte> input, Span<uint> cv)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+
+        var cv0 = ivRow;
+        var cv1 = Vector128.Create(Blake3Constants.Iv4, Blake3Constants.Iv5,
+            Blake3Constants.Iv6, Blake3Constants.Iv7);
+
+        ref byte src = ref MemoryMarshal.GetReference(input);
+        int pos = 0;
+        uint startFlag = Blake3Constants.ChunkStart;
+
+        while (input.Length - pos > Blake3Constants.BlockLen)
+        {
+            var row0 = cv0;
+            var row1 = cv1;
+            var row2 = ivRow;
+            var row3 = Vector128.Create(0u, 0u, (uint)Blake3Constants.BlockLen, startFlag);
+
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3,
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref b),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48)));
+
+            cv0 = Sse2.Xor(row0, row2);
+            cv1 = Sse2.Xor(row1, row3);
+
+            pos += Blake3Constants.BlockLen;
+            startFlag = 0;
+        }
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cv);
+        VectorCompat.Store(cv0, ref outRef);
+        VectorCompat.Store(cv1, ref outRef, 4);
+        return pos;
+    }
+
+    /// <summary>
+    /// Root hash of a whole 0..1024-byte chunk under any key and domain flags, producing the
+    /// 32-byte digest: <see cref="HashChunkRoot32Iv"/> without the IV and zero-flag constants.
+    /// </summary>
+    /// <remarks>
+    /// Keyed and derive-key one-shots used to take the generic path: one span-compressor call
+    /// per block with the chaining value round-tripping through memory, and for a short input
+    /// a zeroed 64-byte stack block that the message was copied into and loaded back from.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static void HashChunkRoot32(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags,
+        ReadOnlySpan<byte> input, Span<uint> output)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+
+        ref uint keyRef = ref MemoryMarshal.GetReference(key);
+        var cv0 = VectorCompat.Load(ref keyRef);
+        var cv1 = VectorCompat.Load(ref keyRef, 4);
+
+        uint counterLo = (uint)chunkCounter;
+        uint counterHi = (uint)(chunkCounter >> 32);
+        ref byte src = ref MemoryMarshal.GetReference(input);
+        int pos = 0;
+        uint startFlag = flags | Blake3Constants.ChunkStart;
+
+        while (input.Length - pos > Blake3Constants.BlockLen)
+        {
+            var row0 = cv0;
+            var row1 = cv1;
+            var row2 = ivRow;
+            var row3 = Vector128.Create(counterLo, counterHi, (uint)Blake3Constants.BlockLen, startFlag);
+
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3,
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref b),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48)));
+
+            cv0 = Sse2.Xor(row0, row2);
+            cv1 = Sse2.Xor(row1, row3);
+
+            pos += Blake3Constants.BlockLen;
+            startFlag = flags;
+        }
+
+        int lastLen = input.Length - pos;
+        uint lastFlags = startFlag | Blake3Constants.ChunkEnd | Blake3Constants.Root;
+
+        Vector128<uint> m0, m1, m2, m3;
+        if (lastLen == Blake3Constants.BlockLen)
+        {
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            m0 = Unsafe.ReadUnaligned<Vector128<uint>>(ref b);
+            m1 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16));
+            m2 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32));
+            m3 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48));
+        }
+        else
+        {
+            LoadPaddedBlock(input.Slice(pos, lastLen), out m0, out m1, out m2, out m3);
+        }
+
+        var f0 = cv0;
+        var f1 = cv1;
+        var f2 = ivRow;
+        var f3 = Vector128.Create(counterLo, counterHi, (uint)lastLen, lastFlags);
 
         DoRoundsShuffle(ref f0, ref f1, ref f2, ref f3, m0, m1, m2, m3);
 
@@ -358,6 +531,31 @@ internal static class CompressSse41
         VectorCompat.Store(Sse2.Xor(row1, row3), ref outRef, 4);
     }
 
+    /// <summary>
+    /// Root compression of a final block of 0..64 bytes, producing the 32-byte digest. The
+    /// zero padding is built in registers, so the block need not be padded in memory.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void CompressPartialBlockRoot32(ReadOnlySpan<uint> cv, ReadOnlySpan<byte> block,
+        ulong counter, uint flags, Span<uint> output)
+    {
+        ref uint cvRef = ref MemoryMarshal.GetReference(cv);
+        var row0 = VectorCompat.Load(ref cvRef);
+        var row1 = VectorCompat.Load(ref cvRef, 4);
+        var row2 = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        var row3 = Vector128.Create((uint)counter, (uint)(counter >> 32), (uint)block.Length, flags);
+
+        LoadPaddedBlock(block, out var m0, out var m1, out var m2, out var m3);
+
+        DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3, m0, m1, m2, m3);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(output);
+        VectorCompat.Store(Sse2.Xor(row0, row2), ref outRef);
+        VectorCompat.Store(Sse2.Xor(row1, row3), ref outRef, 4);
+    }
+
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void Compress(ReadOnlySpan<uint> cv, ReadOnlySpan<uint> block,
@@ -419,7 +617,7 @@ internal static class CompressSse41
         VectorCompat.Store(Sse2.Xor(row1, row3), ref outRef, 4);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     private static void DoRoundsShuffle(
         ref Vector128<uint> row0_ref, ref Vector128<uint> row1_ref,
         ref Vector128<uint> row2_ref, ref Vector128<uint> row3_ref,

@@ -101,6 +101,10 @@ public unsafe struct Hasher : IDisposable
             // Exactly two blocks: fully unrolled, every flag a compile-time constant.
             CompressSse41.CompressRootIvTwoBlocks(input, hash.AsWordSpan());
         }
+        else if (input.Length <= 3 * Blake3Constants.BlockLen && CompressSse41.IsSupported)
+        {
+            CompressSse41.CompressRootIvThreeBlocks(input, hash.AsWordSpan());
+        }
         else if (input.Length <= Blake3Constants.ChunkLen && CompressSse41.IsSupported)
         {
             // Multi-block single chunk, unkeyed: straight to the fused chunk loop, same reason.
@@ -116,7 +120,13 @@ public unsafe struct Hasher : IDisposable
             // below the size where the thread-pool path takes over, and at any size when the
             // caller has capped parallelism at one -- a pool with a single thread would do the
             // same work plus the hand-off.
-            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
+#if NET8_0_OR_GREATER
+            if (System.Runtime.Intrinsics.X86.Avx512F.VL.IsSupported
+                && input.Length > 3 * 1024 && input.Length <= 4 * 1024)
+                Blake3Tree.HashFourChunkRoot32(input, hash.AsSpan());
+            else
+#endif
+                Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, hash.AsSpan());
         }
         else if (Blake3Tree.IsMidSize(input.Length))
         {
@@ -154,6 +164,13 @@ public unsafe struct Hasher : IDisposable
         }
 
         Unsafe.SkipInit(out Blake3.Managed.Hash hash);
+
+        if (BitConverter.IsLittleEndian)
+        {
+            // The key bytes already are the key words: read them where they lie.
+            HashWithKey(MemoryMarshal.Cast<byte, uint>(key), Blake3Constants.KeyedHash, input, hash.AsSpan());
+            return hash;
+        }
 
         Span<uint> keyWords = stackalloc uint[8];
         Blake3Core.WordsFromLeBytes(key, keyWords);
@@ -222,6 +239,8 @@ public unsafe struct Hasher : IDisposable
                     CompressSse41.CompressRootIvSingleBlock(input, words);
                 else if (input.Length <= 2 * Blake3Constants.BlockLen)
                     CompressSse41.CompressRootIvTwoBlocks(input, words);
+                else if (input.Length <= 3 * Blake3Constants.BlockLen)
+                    CompressSse41.CompressRootIvThreeBlocks(input, words);
                 else
                     CompressSse41.HashChunkRoot32Iv(input, words);
             }
@@ -253,7 +272,14 @@ public unsafe struct Hasher : IDisposable
         }
         else if (input.Length <= Blake3Tree.MaxUsefulLength || degree == 1)
         {
-            Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
+#if NET8_0_OR_GREATER
+            if (System.Runtime.Intrinsics.X86.Avx512F.VL.IsSupported
+                && output.Length == Blake3.Managed.Hash.Size
+                && input.Length > 3 * 1024 && input.Length <= 4 * 1024)
+                Blake3Tree.HashFourChunkRoot32(input, output);
+            else
+#endif
+                Blake3Tree.HashAllAtOnce(input, Blake3Constants.IV, 0, output);
         }
         else if (Blake3Tree.IsMidSize(input.Length))
         {
@@ -273,6 +299,35 @@ public unsafe struct Hasher : IDisposable
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void HashOneChunkXof(ReadOnlySpan<byte> input, Span<byte> output)
     {
+        if (BitConverter.IsLittleEndian)
+        {
+            // Absorb through a fused block loop (SSE, or scalar on ARM), then hand only the final
+            // block to the Output: ChunkState.Update compresses through the generic span
+            // compressor, one call per block with the chaining value round-tripping through memory.
+            Span<uint> cv = stackalloc uint[8];
+            int pos = CompressSse41.IsSupported
+                ? CompressSse41.HashChunkPrefixIv(input, cv)
+                : CompressScalar.HashChunkPrefix(Blake3Constants.IV, 0, 0, input, cv);
+            int lastLen = input.Length - pos;
+
+            Span<uint> block = stackalloc uint[16];
+            if (lastLen == Blake3Constants.BlockLen)
+            {
+                MemoryMarshal.Cast<byte, uint>(input.Slice(pos)).CopyTo(block);
+            }
+            else
+            {
+                block.Clear();
+                input.Slice(pos).CopyTo(MemoryMarshal.AsBytes(block));
+            }
+
+            uint flags = (pos == 0 ? Blake3Constants.ChunkStart : 0u) | Blake3Constants.ChunkEnd;
+            Unsafe.SkipInit(out Blake3Core.Output root);
+            root.Init(cv, block, 0, (uint)lastLen, flags);
+            root.RootOutputBytes(output);
+            return;
+        }
+
         var chunk = new Blake3Core.ChunkState(Blake3Constants.IV, 0, 0);
         chunk.Update(input);
         chunk.CreateOutput().RootOutputBytes(output);
@@ -349,10 +404,11 @@ public unsafe struct Hasher : IDisposable
 #pragma warning restore 465
     {
         if (!_initialized) ThrowNotInitialized();
+        Unsafe.SkipInit(out Blake3.Managed.Hash hash);
+        if (_state.TryFinalizeSingleChunk32(hash.AsSpan())) return hash;
         var output = _state.Finalize();
-        Span<byte> bytes = stackalloc byte[Blake3.Managed.Hash.Size];
-        output.RootOutputBytes(bytes);
-        return Blake3.Managed.Hash.FromBytes(bytes);
+        output.RootOutputBytes(hash.AsSpan());
+        return hash;
     }
 
     /// <summary>
@@ -362,6 +418,7 @@ public unsafe struct Hasher : IDisposable
     public void Finalize(Span<byte> hash)
     {
         if (!_initialized) ThrowNotInitialized();
+        if (hash.Length == Blake3.Managed.Hash.Size && _state.TryFinalizeSingleChunk32(hash)) return;
         var output = _state.Finalize();
         output.RootOutputBytes(hash);
     }
@@ -467,6 +524,12 @@ public unsafe struct Hasher : IDisposable
     public static void NewKeyed(ReadOnlySpan<byte> key, out Hasher hasher)
     {
         if (key.Length != 32) throw new ArgumentOutOfRangeException(nameof(key), "Expecting the key to be 32 bytes");
+
+        if (BitConverter.IsLittleEndian)
+        {
+            Construct(out hasher, MemoryMarshal.Cast<byte, uint>(key), Blake3Constants.KeyedHash);
+            return;
+        }
 
         Span<uint> keyWords = stackalloc uint[8];
         Blake3Core.WordsFromLeBytes(key, keyWords);

@@ -55,7 +55,7 @@ Namespace: `Blake3.Managed`. The library targets `net6.0`, `net8.0` and `net10.0
 - Its separate `HashManyPartial` kernel handles 5–7 chunks without padding. Keep variable offsets out of the full-batch loop: combining them regressed 8 KB inputs.
 - `HashManySerial` steps the four G's of each half-round (`G256x4`) within one eight-chunk batch -- the same lever that won on NEON; it does not interleave two batches. It runs in the serial one-shot tree, in `Update`'s aligned subtrees (`HashAlignedSubtree`) and in `UpdateWithJoin`'s workers (`JoinJob`). The one-shot parallel workers (`SubtreeCvSerial` -> `CompressSubtreeWide`) keep the original `HashMany`, or `HashMany16` for an exact 16-chunk subtree, and so does `Update`'s lone 5-8 chunk batch. A 2026-09-09 follow-up run measured 7.6% less time at 64 KB in the adaptive job and 21.7% less at 8 KB with AVX-512 disabled; large parallel results were inconclusive.
 - **`HashTwoAvx2.cs`** — Two complete chunks in the two 128-bit halves of AVX2 registers, for remainders below the 4-way kernel.
-- **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Requires AVX-512 VL for the 32-register file; dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14).
+- **`HashFourAvx2.cs`** — Three or four complete chunks as two interleaved copies of the `HashTwoAvx2` schedule (generated statement by statement from it). One chain is latency-bound, so two chains cost about the same time. Dispatched ahead of the 128-bit 4-way kernel in the tree and in `Update`. Measured 18-28% less time at 4 KB on a Zen 4 desktop (2026-09-14). It used to require AVX-512 VL on the argument that two chains spill with sixteen registers; they do, and it still won on Haswell (4 KiB 0.64, 2026-10-08), so it now runs on any AVX2 CPU. `HashFourPartial` carries a partial final chunk in the spare lane.
 - `HashTwo` and `HashFour` are `NoInlining`: Tier1 with PGO otherwise inlined the whole two-chunk kernel into `Blake3Tree.HashAllAtOnce`, which ran 4-5x slower at 2 KB. Any large kernel without a `stackalloc` can be inlined this way; keep them marked.
 - **`OutputManyAvx2.cs`** — Eight 64-byte XOF output blocks per batch; arbitrary seek prefixes and output tails remain in `Output.RootOutputBytesAt`.
 - **`CompressNeon.cs` / `HashManyNeon.cs`** — ARM NEON single-block and 4-way multi-chunk hashing. Only `HashManyNeon.HashMany` is reachable, and only ever with `numChunks` of 4. The ARM64 single-block path deliberately uses `CompressScalar`, because dispatching to `CompressNeon` measured 2.6x slower up to 4 KB on a Cortex-A73 (see the dead ends, and the remark on the class). `HashManyNeon.HashManyPartial` covers a 3-chunk remainder (2 chunks is a dead end, see below) and `HashManyNeon.HashParents4` batches parent compression 4-way. Since 2026-09-25 the rounds of those three kernels are written out statement by statement, stepped across the four G's of each half-round, with `(a + m) + b` and a per-round barrier store -- 0.55-0.56 of the old time on Cortex-A73 and 0.68 on Neoverse-V1, and no spills (see "NEON round, 2026-09-25"). `HashManyNeon.HashMany8` has **no callers at all**, deliberately: it is an inlining-budget failure (33 real calls), and even written out an 8-chunk two-chain kernel does not beat two 4-way calls on either core.
@@ -189,12 +189,185 @@ An apparent AVX2 4-byte probe slowdown did not reproduce in dedicated BDN
 Disassembly confirms the fused body calls the round helper directly instead of
 calling the generic span compressor for every block.
 
-**Rejected P1 round inlining.** Source-copy assemblies in separate load contexts
+**Rejected P1 round inlining -- reversed 2026-10-08, see "Small-payload round": shipped at 0.93 (Zen 4) and 0.90-0.92 (Haswell) for 65 B-1 KiB.** Source-copy assemblies in separate load contexts
 suggested small-input gains, but real-project BenchmarkDotNet did not reproduce
 the 128/1024-byte benefit, including the exact adapter-shaped call. Disassembly
 confirmed inlining happened. The harness discrepancy remains unexplained; do not
 reuse those probe gains as evidence. Both inlining and the attempted AVX2 guard
 were reverted. Prefer actual project references and confirm changes with BDN.
+
+### Paired parent compression experiment, 2026-10-05
+
+Implemented and reverted three integrations of a two-parent AVX2 kernel using
+`HashTwoAvx2`'s existing round schedule. Initial Fedora Ryzen 7 8845HS / .NET
+10.0.11 BDN against fresh HEAD `8dd18e6` showed **989.0 -> 947.8 ns at 4 KiB**
+and **2,063.2 -> 2,006.7 ns at 16 KiB**. Five-process paired sweeps over all 27
+sizes also looked promising. BDN at 8 KiB varied substantially across launches
+and orders; do not quote its best run as a reliable gain.
+
+**Rejected at the concurrency gate.** Dispatching pairs from `CompressParents`
+caused AVX2-only throughput losses of roughly 6-7% in several one-shot cases and
+up to 20% in `UpdateWithJoin`. One-shot regressions persisted in three fresh
+processes. Restricting dispatch to AVX-512VL did not remove the AVX2 losses, even
+though diagnostic optimized reducer instructions then matched the baseline.
+Two unchanged/unchanged join controls passed the harness's 5% screen. The issue
+is associated with the integration in this setup; a JIT inlining/profile change
+is a hypothesis, not an established explanation.
+
+A third variant restored `CompressParents` exactly and paired only the final
+four CVs in the stack-allocating `CompressSubtreeToParentBlock`. This recovered
+the tested join throughput, but its AVX2 one-shot screen lost 24.6% at 32 KiB
+with 16 callers while gaining elsewhere. Stopped at this failed gate. None of
+these variants ships. The previously retained fused chunk loop is unchanged.
+
+All three candidates passed 497 tests in both ISA configurations, including
+scalar differential checks of paired parents, flags, unaligned input, output
+bounds and overlapping output. The benchmark correctness gate passed 7,492
+checks. Native paired-parent code was 1,697 bytes with no managed helper calls.
+Before retrying, investigate caller code generation under concurrent load;
+small single-caller wins are insufficient evidence for this implementation.
+
+### Isolated paired parents follow-up, 2026-10-05
+
+Tried dedicated one-shot helpers with the shared reducer unchanged. Broad and
+wrapper variants were not retained. The most promising version dispatches
+**directly at both unkeyed one-shot call sites**, only on AVX-512VL for
+3,073..4,096 bytes and 32-byte output. It hashes four chunk CVs, pairs the two
+non-root parents, then compresses the root. On Fedora / .NET 10.0.11 versus
+HEAD `8dd18e6`, adaptive BDN measured **1,032 -> 978 ns at 3,073 bytes** and
+**996.5 -> 934.7 ns at 4,096 bytes** (about 5.2% and 6.2% less time).
+The direct candidate passed 497 native and 497 AVX2-only tests and all three
+TFM builds. The wrapper fallback still emitted another call frame; matching
+the original argument signature did not produce a tailcall.
+
+**Measurement qualification to the preceding rejection:** the existing
+concurrency entry point runs candidate-only correctness before timing, and
+its hot closure mixes implementations and API branches. Separating wrappers
+and using fresh timing processes changed the large AVX2 losses, sometimes
+into apparent baseline losses. This does not establish a specific JIT cause.
+Separate-process default-runtime BDN with 16 persistent callers found native
+4 KiB batch times 2.043 -> 2.024 ms (overlapping intervals), no large 8 KiB
+loss, and AVX2 `UpdateWithJoin` at 32 KiB **23.37 -> 23.35 ms**, effectively
+parity. Do not treat the earlier 20% loss as a proven algorithm regression.
+
+**Deferred, not accepted or disproven.** The user requested wrapping up before
+the full 27-size regression sweep and broader load validation. Production
+changes were reverted and the exact direct-dispatch patch, test and raw
+results archived outside the repository; `ideas.local.md` records their
+location and resume steps. The 8 KiB controls remain process-sensitive.
+No claim of regression-free behavior, all-size leadership or Apple M4 gains.
+
+### Small-payload round, 2026-10-08
+
+**Method: a paired separate-process harness instead of BDN.** One process times one build
+(Baseline, refreshed to HEAD `c31b4e3`, or the candidate) after a 250 ms warm-up with
+`DOTNET_TC_CallCountingDelayMs=0`, 25 batches of ~4 ms, median per process; processes alternate
+ABBA/BAAB pinned to one core, and the verdict is the mean of per-block log ratios with a
+t-interval. Before timing, both builds are compared byte for byte at every length 0..2200 and
+every 97th to 20000 for one-shot, span, keyed, XOF (128 B and 1 KiB), incremental, keyed
+incremental and derive-key. Null test (byte-identical builds): within +/-1% on Fedora (XOF
++/-3-5%), +/-0.1% on the A73, +/-2-3% on the `alpine-omv` VM, whose cells from 5 KiB up are
+bimodal and should not be read. It resolved ~1% where BDN had called sub-5% changes
+unresolvable -- and reversed the P1 rejection above. Hosts: Fedora (Ryzen 7 8845HS, AVX-512,
+.NET 10.0.11), `alpine-omv` (i5-4460 Haswell, AVX2 only), ODROID N2+ (Cortex-A73, .NET 10.0.12),
+each pinned to CPU 2. Void (Ryzen 7 255, Zen 4 VM) was validated later in the campaign.
+
+Shipped, each measured alone against HEAD before being combined:
+
+- **`DoRoundsShuffle` inlined** (P1/X3) into the SSE entry points: the chaining value no longer
+  round-trips through memory between blocks (Windows also passes the four message vectors by
+  hidden reference). 65 B-1 KiB 0.93 on Zen 4, 0.90-0.92 on Haswell; single blocks 0.94-0.96 on
+  Haswell, neutral on Zen 4.
+- **Partial final chunk in a spare SIMD lane** (X1/P3 generalised): `HashTwoAvx2.HashOneAndPartial`
+  (1 full + partial), `HashFourAvx2.HashFourPartial` (2-3 + partial), `HashManyAvx2.HashManyPartialTail`
+  (4-7 + partial), `HashManyNeon.HashManyPartialTail` (2-3 + partial). The partial chunk used to be
+  hashed serially after the kernel, so 4095 B cost 1.8x 4096 B. Once its last block is done its
+  CV is latched and the lane recompresses a padded copy. Thresholds from measurement: 2 full +
+  partial needs more than two blocks on x86 and more than six on NEON; 4 + partial needs more
+  than seven blocks; 3 + partial through the 8-way kernel lost 23-33% on Haswell and is not used.
+- **`HashFour` on AVX2 without AVX-512 VL.** It spills with sixteen registers and still wins:
+  Haswell 4 KiB 0.64, 3 KiB 0.90 against the 128-bit four-way kernel / pair + single chunk.
+- **Tiny incremental:** `Finalize` of a single chunk compresses the buffered block straight into
+  the digest instead of building an `Output`; a short `Update` into an empty block copies inline;
+  `Dispose` skips the CV-stack memset when no chunk completed (`Reset` now clears the used
+  stack first, which makes that safe).
+- **Keyed:** fused SSE keyed chunk loop for one-shots up to one chunk (a full 64-byte block keeps
+  the direct path, which measured faster); key bytes read in place on little-endian in
+  `HashKeyed` and `NewKeyed(out)`.
+- **One-chunk XOF:** absorb through a fused prefix loop (`HashChunkPrefixIv` on SSE,
+  `CompressScalar.HashChunkPrefix` elsewhere) and hand only the final block to `Output`.
+- **ARM fused scalar chunk loop** (`CompressScalar.HashChunk`): CV in registers across blocks for
+  root and non-root chunks; one-block inputs keep the direct path, which was faster at 4-64 B.
+- **Per-round barrier store in the AVX2 8-way kernels, AVX-512 VL only** (P4/X2): takes
+  `HashManySerial` and `HashManyPartial` from 175 frame spills to none -- the first source change
+  shown to move the round-phase spill count. On sixteen registers it compiled to 976 -> 868 frame
+  accesses with Haswell medians leaning slower, so `Barrier()` compiles away there and those
+  listings are identical to the baseline. Fedora 8-12 KiB 0.97-0.98.
+- **Four-chunk root** (P5, `direct-four-chunk.patch`): 3073-4096 B 0.94-0.97, and the concurrency
+  gate passed this time.
+- **pshufb masks written in place.** `static readonly Vector*` masks are only JIT constants once
+  the class is initialized, so whichever AVX2 kernel compiled first in a process kept a class-init
+  check and a load in its loop (true of HEAD too, on AVX2-only CPUs); a property instead added a
+  call level past these kernels' inlining budget and became a real call per rotate (1.4-1.9x slower
+  on Haswell). The constant now sits in each rotate helper.
+- **Incremental `Update` uses the partial lane too.** When an `Update` holds whole chunks and a
+  partial one, the batch kernel carries the partial chunk in a spare lane and also latches its
+  chaining value *before its final block* (`prefixCv`) -- exactly the state `ChunkState` reaches
+  on its own -- so `StartPartialChunk` sets the chunk state directly instead of compressing those
+  blocks one at a time. Later input and `Finalize` then behave exactly as before. A first version
+  that only kept the final CV for `Finalize` gained little and lost 3-16%: `ChunkState.Update`
+  compresses every block but the last as it absorbs, so the chunk was still hashed serially.
+  Incremental 3000-4000 B 0.61-0.63 (Fedora), 0.60 (Haswell), 0.76-0.86 (A73). Four whole chunks
+  + partial uses the 8-way kernel only with AVX-512 VL (1.38x slower that way on Haswell).
+- **`HashMany16` CV export vectorised** (P6): two 8x8 transposes instead of 128 scalar moves;
+  16-64 KiB 0.976-0.986.
+- **The last two CVs written straight into the root block** (E8192-B): 0.99-1.00, never slower.
+- **Three-block unrolled path for 129-192 B** (`CompressRootIvThreeBlocks`, P8's "fused 129-192"
+  item): 0.98-0.99 on Fedora, Haswell and Void.
+- **9..15-chunk subtrees in one 16-lane AVX-512 pass** (P7, `HashMany16Ragged`), above 11 KiB
+  only: 14-15 chunks 0.89-0.90, 12 chunks 0.97; 9-10 chunks were 2-4% slower this way and 16 + 9
+  chunks 13% slower, hence the threshold.
+
+Combined (`Hash` / keyed / incremental, candidate / HEAD):
+
+| host | 4-64 B | 65 B-1 KiB | 1025-2047 B | 2049-4095 B | 4097-8191 B | exact multiples of 1 KiB | tiny incremental | incremental 1025-8191 B |
+|---|---|---|---|---|---|---|---|---|
+| Fedora (Zen 4) | 1.00 / 0.88-0.92 | 0.93 / 0.89 | 0.65-0.90 | 0.55-0.93 | 0.62-0.70 | 0.93-0.99 | 0.79-0.87 | 0.61-0.96 |
+| N2+ (A73) | 0.99 / 0.93 | 0.96-0.98 / 0.95 | 0.96 | 0.73-0.97 | -- | 1.00 | 0.86-0.87 | 0.76-0.98 |
+| Void (Ryzen 7 255, Zen 4 VM) | 1.00 / 0.87-0.91 | 0.93 / 0.89-0.90 | 0.64-0.90 | 0.52-0.98 | 0.64-0.71 | 0.93-0.99 | 0.78-0.89 | 0.58-0.96 |
+| Haswell (AVX2) | 0.95-0.96 / 0.85-0.89 | 0.90-0.92 / 0.87-0.88 | 0.70-0.97 | 0.60-0.86 | 0.85 | 0.64-0.88 (8-16 KiB inconclusive) | 0.81-0.85 | 0.60-0.91 |
+
+Nothing measured slower beyond 0.4% on any of the four hosts (span at 64 B on Fedora +0.4%, four
+A73 cells at +0.1-0.15%). `--concurrent` at 4 KiB-1 MiB, `Hash` and `UpdateWithJoin`, on every
+host: Fedora (1/8/16 callers) every cell 1.009 or better; Void (1/8/16) 0.98-1.07 within that VM's
+round spread; N2+ (1/4/6) 0.980-1.048 within noise; Alpine (1/4) passed the campaign gate, with
+larger-input timing limited by the VM noise described above. The BDN correctness gate
+passed on each. 573 unit tests pass on all four x86
+tiers and on the A73 (`PartialLaneTests` checks every new kernel lane by lane, every partial length,
+counters across the 2^32 carry, all flag modes, guard words, and the incremental prefix through
+further input, `Reset`, split updates and `UpdateWithJoin`).
+
+Cost: the inlined round bodies and extra kernels make the first hash in a fresh process slower to
+JIT -- +1.3 ms at 64 B, +3.3 ms at 100 B-1 KiB, +2.1 ms at 4 KiB and XOF, +4.5 ms for a 3000-byte
+incremental hash (Fedora, means of 12 processes; Void the same within 0.5 ms). The A73 JITs far more
+slowly: +5 ms at 100 B-1 KiB and +29 ms (53 -> 81 ms) for a 3000-byte incremental hash, which
+compiles the NEON partial-tail kernel. Restructuring the chunk loops so each method
+holds one copy of the rounds halved that but was 5-9% slower in steady state on Haswell, so it was
+not kept.
+
+Rejected: an overlapping 16-byte tail load + `pshufb` for partial lanes (<0.5% at 65-200 B, and
+the single-block path 3-7% slower at 4-64 B from the larger loader); the single-copy chunk loops
+above; computing each round's message permutation ahead of the state arithmetic (E64-B/P8: 3-5%
+slower at 4-64 B on Zen 4, 1-3% on Haswell); gathering each round's message vectors straight from
+the sixteen original words in memory (P8 "absolute schedule": 18-34% slower at 4-64 B on Zen 4,
+14-18% on Haswell); `pshufb` instead of `vprord` for the 16- and 8-bit rotates with AVX-512 VL
+(X13: 4-7% slower at 4-64 B on Fedora and Void); keeping only the final CV of the partial chunk for
+`Finalize` (above); a 2-lane `Vector64` NEON kernel for 2 KiB (probe: 64-bit ops only 1.27x the
+128-bit rate on the A73); G5 hot/cold split (Tier1 already inlines the single-block compressor into
+`Hash`). Single blocks sit at the latency floor on both ISAs: ~210 cycles a compression on Zen 4
+against ~168 for the arithmetic chain, ~465 on the A73, which is throughput-bound on two integer
+ALUs. Void's null test read +/-1-2%, and its final run matched Fedora within a
+couple of percent with no slower cell.
 
 ### ARM64
 

@@ -16,14 +16,11 @@ internal static class HashTwoAvx2
 {
     internal static bool IsSupported => Avx2.IsSupported;
 
-    private static readonly Vector256<byte> Rot16Mask256 = Vector256.Create(
-        (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
-
-    private static readonly Vector256<byte> Rot8Mask256 = Vector256.Create(
-        (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12,
-        1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
-
+    // The pshufb masks are written in place in these helpers, in every kernel class. A static
+    // readonly field is only a JIT constant once its class is initialized, so a kernel compiled
+    // first kept a class-init check and a memory load in its loop; a property instead adds a call
+    // level that the inlining budget of these large kernels does not cover, and became a real
+    // call per rotate (AVX2 without AVX-512 VL, Haswell, 2026-10-08: 1.4-1.9x slower).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> RotateRight16(Vector256<uint> v)
     {
@@ -31,7 +28,7 @@ internal static class HashTwoAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 16);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot16Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -51,7 +48,7 @@ internal static class HashTwoAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 8);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot8Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12, 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -103,6 +100,110 @@ internal static class HashTwoAvx2
         VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x20), ref destination);
         VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x31), ref destination, 8);
     }
+
+    /// <summary>
+    /// Hashes one full chunk and the partial chunk after it (1025..2047 input bytes), one in
+    /// each 128-bit half, writing both chaining values to <paramref name="cvs"/>.
+    /// </summary>
+    /// <remarks>
+    /// The partial chunk used to be hashed after the full one, so a 1025-byte input cost 17
+    /// sequential compressions before the parent; here it rides in the spare lane and the whole
+    /// leaf level costs the 16 compressions of the full chunk. Once the short chunk's final block
+    /// is done its chaining value is latched, and the lane keeps recompressing that padded block
+    /// until the full chunk finishes; those results are discarded.
+    /// </remarks>
+    /// <param name="input">One complete chunk followed by a nonempty partial chunk.</param>
+    /// <param name="key">The eight key words.</param>
+    /// <param name="counter">The first chunk's counter.</param>
+    /// <param name="flags">The hashing mode flags.</param>
+    /// <param name="cvs">Receives the two eight-word chaining values in chunk order.</param>
+    /// <param name="prefixCv">If not empty, receives the partial chunk's chaining value before its
+    /// final block -- the state <c>ChunkState</c> reaches on its own after absorbing those bytes,
+    /// so an incremental Update can hand it the chunk without compressing it again.</param>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
+    internal static void HashOneAndPartial(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+        ulong counter, uint flags, Span<uint> cvs, Span<uint> prefixCv = default)
+    {
+        int partialLen = input.Length - Blake3Constants.ChunkLen;
+        int lastBlock = (partialLen - 1) >> 6;                   // 0..15
+        int lastLen = partialLen - (lastBlock << 6);              // 1..64
+
+        // The short chunk's final block, zero-padded, so no lane ever reads past the input.
+        Span<byte> padded = stackalloc byte[Blake3Constants.BlockLen];
+        padded.Clear();
+        input.Slice(Blake3Constants.ChunkLen + (lastBlock << 6), lastLen).CopyTo(padded);
+
+        ref byte source = ref MemoryMarshal.GetReference(input);
+        ref byte partial = ref Unsafe.Add(ref source, Blake3Constants.ChunkLen);
+        ref byte pad = ref MemoryMarshal.GetReference(padded);
+        ref uint keyRef = ref MemoryMarshal.GetReference(key);
+        var key0 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.As<uint, byte>(ref keyRef));
+        var key1 = Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref keyRef, 4)));
+        var cv0 = Vector256.Create(key0, key0);
+        var cv1 = Vector256.Create(key1, key1);
+        var iv = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        var ivRow = Vector256.Create(iv, iv);
+        Vector128<uint> partialCv0 = default, partialCv1 = default;
+
+        for (int block = 0; block < 16; block++)
+        {
+            uint fullFlags = flags | (block == 0 ? Blake3Constants.ChunkStart : 0u)
+                                   | (block == 15 ? Blake3Constants.ChunkEnd : 0u);
+            uint partFlags;
+            uint partLen;
+            ref byte partSource = ref pad;
+            if (block < lastBlock)
+            {
+                partFlags = flags | (block == 0 ? Blake3Constants.ChunkStart : 0u);
+                partLen = 64;
+                partSource = ref Unsafe.Add(ref partial, block << 6);
+            }
+            else
+            {
+                partFlags = flags | (lastBlock == 0 ? Blake3Constants.ChunkStart : 0u)
+                                  | Blake3Constants.ChunkEnd;
+                partLen = (uint)lastLen;
+            }
+
+            var r0 = cv0;
+            var r1 = cv1;
+            var r2 = ivRow;
+            var r3 = Vector256.Create((uint)counter, (uint)(counter >> 32), 64u, fullFlags,
+                (uint)(counter + 1), (uint)((counter + 1) >> 32), partLen, partFlags);
+            int offset = block * 64;
+            DoRoundsShuffle(ref r0, ref r1, ref r2, ref r3,
+                LoadPair(ref source, offset, ref partSource, 0),
+                LoadPair(ref source, offset + 16, ref partSource, 16),
+                LoadPair(ref source, offset + 32, ref partSource, 32),
+                LoadPair(ref source, offset + 48, ref partSource, 48));
+            cv0 = Avx2.Xor(r0, r2);
+            cv1 = Avx2.Xor(r1, r3);
+            if (block == lastBlock)
+            {
+                partialCv0 = cv0.GetUpper();
+                partialCv1 = cv1.GetUpper();
+            }
+            else if (block == lastBlock - 1 && !prefixCv.IsEmpty)
+            {
+                ref uint pre = ref MemoryMarshal.GetReference(prefixCv);
+                VectorCompat.Store(cv0.GetUpper(), ref pre);
+                VectorCompat.Store(cv1.GetUpper(), ref pre, 4);
+            }
+        }
+
+        ref uint destination = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(cv0.GetLower(), ref destination);
+        VectorCompat.Store(cv1.GetLower(), ref destination, 4);
+        VectorCompat.Store(partialCv0, ref destination, 8);
+        VectorCompat.Store(partialCv1, ref destination, 12);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<uint> LoadPair(ref byte low, int lowOffset, ref byte high, int highOffset) => Vector256.Create(
+        Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref low, lowOffset)),
+        Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref high, highOffset)));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> LoadPair(ref byte source, int offset) => Vector256.Create(
@@ -443,4 +544,34 @@ internal static class HashTwoAvx2
         row2_ref = row2;
         row3_ref = row3;
     }
+
+    /// <summary>Compresses two non-root parents, one in each 128-bit half.</summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
+    internal static void HashParents2(ReadOnlySpan<uint> children, ReadOnlySpan<uint> key,
+        uint parentFlags, Span<uint> cvs)
+    {
+        ref uint keyRef = ref MemoryMarshal.GetReference(key);
+        var key0 = VectorCompat.Load(ref keyRef);
+        var key1 = VectorCompat.Load(ref keyRef, 4);
+        var r0 = Vector256.Create(key0, key0);
+        var r1 = Vector256.Create(key1, key1);
+        var iv = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        var r2 = Vector256.Create(iv, iv);
+        var state = Vector128.Create(0u, 0u, 64u, parentFlags);
+        var r3 = Vector256.Create(state, state);
+        ref uint src = ref MemoryMarshal.GetReference(children);
+        DoRoundsShuffle(ref r0, ref r1, ref r2, ref r3,
+            Vector256.Create(VectorCompat.Load(ref src), VectorCompat.Load(ref src, 16)),
+            Vector256.Create(VectorCompat.Load(ref src, 4), VectorCompat.Load(ref src, 20)),
+            Vector256.Create(VectorCompat.Load(ref src, 8), VectorCompat.Load(ref src, 24)),
+            Vector256.Create(VectorCompat.Load(ref src, 12), VectorCompat.Load(ref src, 28)));
+        var cv0 = Avx2.Xor(r0, r2);
+        var cv1 = Avx2.Xor(r1, r3);
+        ref uint destination = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x20), ref destination);
+        VectorCompat.Store(Avx2.Permute2x128(cv0, cv1, 0x31), ref destination, 8);
+    }
+
 }

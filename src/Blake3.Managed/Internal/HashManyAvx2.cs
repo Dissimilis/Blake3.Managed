@@ -9,13 +9,17 @@ internal static class HashManyAvx2
 {
     public static bool IsSupported => Avx2.IsSupported;
 
-    private static readonly Vector256<byte> Rot16Mask256 = Vector256.Create(
-        (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
-
-    private static readonly Vector256<byte> Rot8Mask256 = Vector256.Create(
-        (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12,
-        1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
+    /// <summary>
+    /// AVX-512 VL is present. Carrying four whole chunks and a partial one in this kernel pays only
+    /// then; on Haswell the two-chain kernel plus the partial chunk on its own was faster
+    /// (4600-byte Update 1.38x slower this way, 2026-10-08).
+    /// </summary>
+    internal static bool HasAvx512Vl =>
+#if NET8_0_OR_GREATER
+        Avx512F.VL.IsSupported;
+#else
+        false;
+#endif
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<uint> RotateRight16(Vector256<uint> v)
@@ -24,7 +28,7 @@ internal static class HashManyAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 16);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot16Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -44,7 +48,7 @@ internal static class HashManyAvx2
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 8);
 #endif
-        return Avx2.Shuffle(v.AsByte(), Rot8Mask256).AsUInt32();
+        return Avx2.Shuffle(v.AsByte(), Vector256.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12, 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -108,7 +112,7 @@ internal static class HashManyAvx2
 
         fixed (byte* chunksPtr = chunks)
         {
-            Vector256<uint>* m = stackalloc Vector256<uint>[16];
+            Vector256<uint>* m = stackalloc Vector256<uint>[17]; // [16]: the per-round barrier slot
 
             for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
             {
@@ -211,6 +215,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                Barrier(m, s0);
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
                 G256(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
@@ -220,6 +225,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                Barrier(m, s0);
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
                 G256(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
@@ -229,6 +235,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                Barrier(m, s0);
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
                 G256(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
@@ -238,6 +245,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                Barrier(m, s0);
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
                 G256(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
@@ -247,6 +255,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                Barrier(m, s0);
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
                 G256(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
@@ -256,6 +265,7 @@ internal static class HashManyAvx2
                 G256(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
                 G256(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                Barrier(m, s0);
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
                 G256(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
                 G256(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
@@ -266,6 +276,7 @@ internal static class HashManyAvx2
                 G256(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
                 G256(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
 
+                Barrier(m, s0);
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = Avx2.Xor(s0, s8);
                 cv1 = Avx2.Xor(s1, s9);
@@ -348,7 +359,7 @@ internal static class HashManyAvx2
 
         fixed (byte* chunksPtr = chunks)
         {
-            Vector256<uint>* m = stackalloc Vector256<uint>[16];
+            Vector256<uint>* m = stackalloc Vector256<uint>[17]; // [16]: the per-round barrier slot
 
             for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
             {
@@ -461,6 +472,7 @@ internal static class HashManyAvx2
                     m[10], m[11],
                     m[12], m[13],
                     m[14], m[15]);
+                Barrier(m, s0);
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -480,6 +492,7 @@ internal static class HashManyAvx2
                     m[12], m[5],
                     m[9], m[14],
                     m[15], m[8]);
+                Barrier(m, s0);
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -499,6 +512,7 @@ internal static class HashManyAvx2
                     m[9], m[0],
                     m[11], m[15],
                     m[8], m[1]);
+                Barrier(m, s0);
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -518,6 +532,7 @@ internal static class HashManyAvx2
                     m[11], m[2],
                     m[5], m[8],
                     m[1], m[6]);
+                Barrier(m, s0);
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -537,6 +552,7 @@ internal static class HashManyAvx2
                     m[5], m[3],
                     m[0], m[1],
                     m[6], m[4]);
+                Barrier(m, s0);
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -556,6 +572,7 @@ internal static class HashManyAvx2
                     m[0], m[10],
                     m[2], m[6],
                     m[4], m[7]);
+                Barrier(m, s0);
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -576,6 +593,7 @@ internal static class HashManyAvx2
                     m[3], m[4],
                     m[7], m[13]);
 
+                Barrier(m, s0);
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = Avx2.Xor(s0, s8);
                 cv1 = Avx2.Xor(s1, s9);
@@ -620,6 +638,21 @@ internal static class HashManyAvx2
 
     // Phase-interleave partial batches and serial one-shot full batches. Parallel workers
     // retain the original full-batch schedule: interleaving hurt large parallel inputs.
+    /// <summary>
+    /// A store of the first state row after each round, with AVX-512 VL only. It stops the JIT
+    /// hoisting the sixteen message loads into registers, which with 32 registers frees enough
+    /// of them that the rounds stop spilling (HashManySerial: 175 frame accesses to none). With
+    /// sixteen registers it measured no better and possibly worse (Haswell, 2026-10-08), so it
+    /// compiles away there.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void Barrier(Vector256<uint>* m, Vector256<uint> s0)
+    {
+#if NET8_0_OR_GREATER
+        if (Avx512F.VL.IsSupported) m[16] = s0;
+#endif
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void G256x4(
         ref Vector256<uint> a0, ref Vector256<uint> b0, ref Vector256<uint> c0, ref Vector256<uint> d0,
@@ -721,7 +754,7 @@ internal static class HashManyAvx2
 
         fixed (byte* chunksPtr = chunks)
         {
-            Vector256<uint>* m = stackalloc Vector256<uint>[16];
+            Vector256<uint>* m = stackalloc Vector256<uint>[17]; // [16]: the per-round barrier slot
 
             for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
             {
@@ -834,6 +867,7 @@ internal static class HashManyAvx2
                     m[10], m[11],
                     m[12], m[13],
                     m[14], m[15]);
+                Barrier(m, s0);
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -853,6 +887,7 @@ internal static class HashManyAvx2
                     m[12], m[5],
                     m[9], m[14],
                     m[15], m[8]);
+                Barrier(m, s0);
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -872,6 +907,7 @@ internal static class HashManyAvx2
                     m[9], m[0],
                     m[11], m[15],
                     m[8], m[1]);
+                Barrier(m, s0);
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -891,6 +927,7 @@ internal static class HashManyAvx2
                     m[11], m[2],
                     m[5], m[8],
                     m[1], m[6]);
+                Barrier(m, s0);
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -910,6 +947,7 @@ internal static class HashManyAvx2
                     m[5], m[3],
                     m[0], m[1],
                     m[6], m[4]);
+                Barrier(m, s0);
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -929,6 +967,7 @@ internal static class HashManyAvx2
                     m[0], m[10],
                     m[2], m[6],
                     m[4], m[7]);
+                Barrier(m, s0);
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
                 G256x4(
                     ref s0, ref s4, ref s8, ref s12,
@@ -949,6 +988,7 @@ internal static class HashManyAvx2
                     m[3], m[4],
                     m[7], m[13]);
 
+                Barrier(m, s0);
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = Avx2.Xor(s0, s8);
                 cv1 = Avx2.Xor(s1, s9);
@@ -960,6 +1000,387 @@ internal static class HashManyAvx2
                 cv7 = Avx2.Xor(s7, s15);
             }
         }
+
+        // 8x8 transpose: word-major to chunk-major
+        var t0 = Avx2.UnpackLow(cv0, cv1);
+        var t1 = Avx2.UnpackHigh(cv0, cv1);
+        var t2 = Avx2.UnpackLow(cv2, cv3);
+        var t3 = Avx2.UnpackHigh(cv2, cv3);
+        var t4 = Avx2.UnpackLow(cv4, cv5);
+        var t5 = Avx2.UnpackHigh(cv4, cv5);
+        var t6 = Avx2.UnpackLow(cv6, cv7);
+        var t7 = Avx2.UnpackHigh(cv6, cv7);
+
+        var u0 = Avx2.UnpackLow(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u1 = Avx2.UnpackHigh(t0.AsUInt64(), t2.AsUInt64()).AsUInt32();
+        var u2 = Avx2.UnpackLow(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u3 = Avx2.UnpackHigh(t1.AsUInt64(), t3.AsUInt64()).AsUInt32();
+        var u4 = Avx2.UnpackLow(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u5 = Avx2.UnpackHigh(t4.AsUInt64(), t6.AsUInt64()).AsUInt32();
+        var u6 = Avx2.UnpackLow(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+        var u7 = Avx2.UnpackHigh(t5.AsUInt64(), t7.AsUInt64()).AsUInt32();
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x20), ref outRef);       // chunk 0
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x20), ref outRef, 8);    // chunk 1
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x20), ref outRef, 16);   // chunk 2
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x20), ref outRef, 24);   // chunk 3
+        VectorCompat.Store(Avx2.Permute2x128(u0, u4, 0x31), ref outRef, 32);   // chunk 4
+        VectorCompat.Store(Avx2.Permute2x128(u1, u5, 0x31), ref outRef, 40);   // chunk 5
+        VectorCompat.Store(Avx2.Permute2x128(u2, u6, 0x31), ref outRef, 48);   // chunk 6
+        VectorCompat.Store(Avx2.Permute2x128(u3, u7, 0x31), ref outRef, 56);   // chunk 7
+    }
+
+    /// <summary>
+    /// <see cref="HashManyPartial"/> for <paramref name="fullChunks"/> (3..7) whole chunks
+    /// followed by a partial chunk, which rides in lane <paramref name="fullChunks"/> instead of
+    /// being hashed afterwards one block at a time. Writes eight CVs; the first
+    /// <paramref name="fullChunks"/> + 1 are meaningful.
+    /// </summary>
+    /// <remarks>
+    /// The partial lane reads its own blocks until its final one, then a zero-padded copy of that
+    /// block; its length and flags enter through a lane blend, and its chaining value is latched
+    /// after the final block. Kept apart from <see cref="HashManyPartial"/> so whole-chunk
+    /// batches do not pay for the extra per-block selects.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static unsafe void HashManyPartialTail(ReadOnlySpan<byte> chunks, int fullChunks,
+                                       ReadOnlySpan<uint> key, ulong startCounter,
+                                       uint flags, Span<uint> cvs, Span<uint> prefixCv = default)
+    {
+        const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
+        if (fullChunks < 3 || fullChunks > 7) throw new ArgumentOutOfRangeException(nameof(fullChunks));
+        int partialLen = chunks.Length - fullChunks * Blake3Constants.ChunkLen;
+        if (partialLen <= 0 || partialLen >= Blake3Constants.ChunkLen) throw new ArgumentException("Need a partial final chunk.", nameof(chunks));
+        int numChunks = fullChunks;
+        int lastBlock = (partialLen - 1) >> 6;
+        int lastLen = partialLen - (lastBlock << 6);
+
+        Vector256<uint>* padded = stackalloc Vector256<uint>[2];
+        padded[0] = default;
+        padded[1] = default;
+        chunks.Slice(fullChunks * Blake3Constants.ChunkLen + (lastBlock << 6), lastLen)
+            .CopyTo(new Span<byte>(padded, Blake3Constants.BlockLen));
+        Vector256<uint>* latched = stackalloc Vector256<uint>[8];
+
+        var laneMask = Avx2.CompareEqual(Vector256.Create(0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u),
+            Vector256.Create((uint)fullChunks));
+
+        // Unused lanes read chunk zero, keeping partial batches inside the input span.
+        // All eight CVs are still written; callers consume only numChunks of them.
+        int offset1 = numChunks > 1 ? 1 * Blake3Constants.ChunkLen : 0;
+        int offset2 = numChunks > 2 ? 2 * Blake3Constants.ChunkLen : 0;
+        int offset3 = numChunks > 3 ? 3 * Blake3Constants.ChunkLen : 0;
+        int offset4 = numChunks > 4 ? 4 * Blake3Constants.ChunkLen : 0;
+        int offset5 = numChunks > 5 ? 5 * Blake3Constants.ChunkLen : 0;
+        int offset6 = numChunks > 6 ? 6 * Blake3Constants.ChunkLen : 0;
+        int offset7 = numChunks > 7 ? 7 * Blake3Constants.ChunkLen : 0;
+
+        Vector256<uint> cv0 = Vector256.Create(key[0]);
+        Vector256<uint> cv1 = Vector256.Create(key[1]);
+        Vector256<uint> cv2 = Vector256.Create(key[2]);
+        Vector256<uint> cv3 = Vector256.Create(key[3]);
+        Vector256<uint> cv4 = Vector256.Create(key[4]);
+        Vector256<uint> cv5 = Vector256.Create(key[5]);
+        Vector256<uint> cv6 = Vector256.Create(key[6]);
+        Vector256<uint> cv7 = Vector256.Create(key[7]);
+
+        var counterLo = Vector256.Create(
+            (uint)(startCounter + 0), (uint)(startCounter + 1),
+            (uint)(startCounter + 2), (uint)(startCounter + 3),
+            (uint)(startCounter + 4), (uint)(startCounter + 5),
+            (uint)(startCounter + 6), (uint)(startCounter + 7));
+        var counterHi = Vector256.Create(
+            (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
+            (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32),
+            (uint)((startCounter + 4) >> 32), (uint)((startCounter + 5) >> 32),
+            (uint)((startCounter + 6) >> 32), (uint)((startCounter + 7) >> 32));
+
+        var ivVec0 = Vector256.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector256.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector256.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector256.Create(Blake3Constants.Iv3);
+        var blockLenVec = Vector256.Create((uint)Blake3Constants.BlockLen);
+
+        fixed (byte* chunksPtr = chunks)
+        {
+            Vector256<uint>* m = stackalloc Vector256<uint>[17]; // [16]: the per-round barrier slot
+
+            for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
+            {
+                byte* blockBase = chunksPtr + blockIdx * 64;
+                byte* partialBlock = blockIdx < lastBlock
+                    ? chunksPtr + fullChunks * Blake3Constants.ChunkLen + blockIdx * 64
+                    : (byte*)padded;
+                uint partLen = blockIdx < lastBlock ? 64u : (uint)lastLen;
+                uint partFlags = flags | (blockIdx == 0 ? Blake3Constants.ChunkStart : 0u)
+                                       | (blockIdx < lastBlock ? 0u : Blake3Constants.ChunkEnd);
+
+                // Load lower 8 words (0-7) from each of 8 chunks contiguously
+                var r0 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 0 * Blake3Constants.ChunkLen);
+                var r1 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 1 ? partialBlock : blockBase + offset1);
+                var r2 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 2 ? partialBlock : blockBase + offset2);
+                var r3 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 3 ? partialBlock : blockBase + offset3);
+                var r4 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 4 ? partialBlock : blockBase + offset4);
+                var r5 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 5 ? partialBlock : blockBase + offset5);
+                var r6 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 6 ? partialBlock : blockBase + offset6);
+                var r7 = Unsafe.ReadUnaligned<Vector256<uint>>(fullChunks == 7 ? partialBlock : blockBase + offset7);
+
+                // 8x8 transpose: chunk-major -> word-major (words 0-7)
+                var bt0 = Avx2.UnpackLow(r0, r1);
+                var bt1 = Avx2.UnpackHigh(r0, r1);
+                var bt2 = Avx2.UnpackLow(r2, r3);
+                var bt3 = Avx2.UnpackHigh(r2, r3);
+                var bt4 = Avx2.UnpackLow(r4, r5);
+                var bt5 = Avx2.UnpackHigh(r4, r5);
+                var bt6 = Avx2.UnpackLow(r6, r7);
+                var bt7 = Avx2.UnpackHigh(r6, r7);
+
+                var bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                var bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                var bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                var bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                var bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                var bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                var bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+                var bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+                m[0] = Avx2.Permute2x128(bu0, bu4, 0x20);
+                m[1] = Avx2.Permute2x128(bu1, bu5, 0x20);
+                m[2] = Avx2.Permute2x128(bu2, bu6, 0x20);
+                m[3] = Avx2.Permute2x128(bu3, bu7, 0x20);
+                m[4] = Avx2.Permute2x128(bu0, bu4, 0x31);
+                m[5] = Avx2.Permute2x128(bu1, bu5, 0x31);
+                m[6] = Avx2.Permute2x128(bu2, bu6, 0x31);
+                m[7] = Avx2.Permute2x128(bu3, bu7, 0x31);
+
+                // Load upper 8 words (8-15) from each of 8 chunks contiguously
+                r0 = Unsafe.ReadUnaligned<Vector256<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 32);
+                r1 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 32);
+                r2 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 32);
+                r3 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 32);
+                r4 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 4 ? partialBlock : blockBase + offset4) + 32);
+                r5 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 5 ? partialBlock : blockBase + offset5) + 32);
+                r6 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 6 ? partialBlock : blockBase + offset6) + 32);
+                r7 = Unsafe.ReadUnaligned<Vector256<uint>>((fullChunks == 7 ? partialBlock : blockBase + offset7) + 32);
+
+                // 8x8 transpose: chunk-major -> word-major (words 8-15)
+                bt0 = Avx2.UnpackLow(r0, r1);
+                bt1 = Avx2.UnpackHigh(r0, r1);
+                bt2 = Avx2.UnpackLow(r2, r3);
+                bt3 = Avx2.UnpackHigh(r2, r3);
+                bt4 = Avx2.UnpackLow(r4, r5);
+                bt5 = Avx2.UnpackHigh(r4, r5);
+                bt6 = Avx2.UnpackLow(r6, r7);
+                bt7 = Avx2.UnpackHigh(r6, r7);
+
+                bu0 = Avx2.UnpackLow(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                bu1 = Avx2.UnpackHigh(bt0.AsUInt64(), bt2.AsUInt64()).AsUInt32();
+                bu2 = Avx2.UnpackLow(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                bu3 = Avx2.UnpackHigh(bt1.AsUInt64(), bt3.AsUInt64()).AsUInt32();
+                bu4 = Avx2.UnpackLow(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                bu5 = Avx2.UnpackHigh(bt4.AsUInt64(), bt6.AsUInt64()).AsUInt32();
+                bu6 = Avx2.UnpackLow(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+                bu7 = Avx2.UnpackHigh(bt5.AsUInt64(), bt7.AsUInt64()).AsUInt32();
+
+                m[8]  = Avx2.Permute2x128(bu0, bu4, 0x20);
+                m[9]  = Avx2.Permute2x128(bu1, bu5, 0x20);
+                m[10] = Avx2.Permute2x128(bu2, bu6, 0x20);
+                m[11] = Avx2.Permute2x128(bu3, bu7, 0x20);
+                m[12] = Avx2.Permute2x128(bu0, bu4, 0x31);
+                m[13] = Avx2.Permute2x128(bu1, bu5, 0x31);
+                m[14] = Avx2.Permute2x128(bu2, bu6, 0x31);
+                m[15] = Avx2.Permute2x128(bu3, bu7, 0x31);
+
+                // Block flags
+                uint blockFlags = flags;
+                if (blockIdx == 0) blockFlags |= Blake3Constants.ChunkStart;
+                if (blockIdx == blocksPerChunk - 1) blockFlags |= Blake3Constants.ChunkEnd;
+                var flagsVec = Vector256.Create(blockFlags);
+
+                Vector256<uint> s0 = cv0, s1 = cv1, s2 = cv2, s3 = cv3;
+                Vector256<uint> s4 = cv4, s5 = cv5, s6 = cv6, s7 = cv7;
+                Vector256<uint> s8 = ivVec0, s9 = ivVec1, s10 = ivVec2, s11 = ivVec3;
+                Vector256<uint> s12 = counterLo, s13 = counterHi;
+                Vector256<uint> s14 = Avx2.BlendVariable(blockLenVec, Vector256.Create(partLen), laneMask);
+                Vector256<uint> s15 = Avx2.BlendVariable(flagsVec, Vector256.Create(partFlags), laneMask);
+
+                // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[0], m[1],
+                    m[2], m[3],
+                    m[4], m[5],
+                    m[6], m[7]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[8], m[9],
+                    m[10], m[11],
+                    m[12], m[13],
+                    m[14], m[15]);
+                Barrier(m, s0);
+                // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[2], m[6],
+                    m[3], m[10],
+                    m[7], m[0],
+                    m[4], m[13]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[1], m[11],
+                    m[12], m[5],
+                    m[9], m[14],
+                    m[15], m[8]);
+                Barrier(m, s0);
+                // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[3], m[4],
+                    m[10], m[12],
+                    m[13], m[2],
+                    m[7], m[14]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[6], m[5],
+                    m[9], m[0],
+                    m[11], m[15],
+                    m[8], m[1]);
+                Barrier(m, s0);
+                // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[10], m[7],
+                    m[12], m[9],
+                    m[14], m[3],
+                    m[13], m[15]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[4], m[0],
+                    m[11], m[2],
+                    m[5], m[8],
+                    m[1], m[6]);
+                Barrier(m, s0);
+                // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[12], m[13],
+                    m[9], m[11],
+                    m[15], m[10],
+                    m[14], m[8]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[7], m[2],
+                    m[5], m[3],
+                    m[0], m[1],
+                    m[6], m[4]);
+                Barrier(m, s0);
+                // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[9], m[14],
+                    m[11], m[5],
+                    m[8], m[12],
+                    m[15], m[1]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[13], m[3],
+                    m[0], m[10],
+                    m[2], m[6],
+                    m[4], m[7]);
+                Barrier(m, s0);
+                // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
+                G256x4(
+                    ref s0, ref s4, ref s8, ref s12,
+                    ref s1, ref s5, ref s9, ref s13,
+                    ref s2, ref s6, ref s10, ref s14,
+                    ref s3, ref s7, ref s11, ref s15,
+                    m[11], m[15],
+                    m[5], m[0],
+                    m[1], m[9],
+                    m[8], m[6]);
+                G256x4(
+                    ref s0, ref s5, ref s10, ref s15,
+                    ref s1, ref s6, ref s11, ref s12,
+                    ref s2, ref s7, ref s8, ref s13,
+                    ref s3, ref s4, ref s9, ref s14,
+                    m[14], m[10],
+                    m[2], m[12],
+                    m[3], m[4],
+                    m[7], m[13]);
+
+                Barrier(m, s0);
+                // Post-XOR: only chaining value (first 8 words)
+                cv0 = Avx2.Xor(s0, s8);
+                cv1 = Avx2.Xor(s1, s9);
+                cv2 = Avx2.Xor(s2, s10);
+                cv3 = Avx2.Xor(s3, s11);
+                cv4 = Avx2.Xor(s4, s12);
+                cv5 = Avx2.Xor(s5, s13);
+                cv6 = Avx2.Xor(s6, s14);
+                cv7 = Avx2.Xor(s7, s15);
+
+                if (blockIdx == lastBlock)
+                {
+                    latched[0] = cv0; latched[1] = cv1; latched[2] = cv2; latched[3] = cv3;
+                    latched[4] = cv4; latched[5] = cv5; latched[6] = cv6; latched[7] = cv7;
+                }
+                else if (blockIdx == lastBlock - 1 && !prefixCv.IsEmpty)
+                {
+                    // The partial chunk's state before its final block, for an incremental Update.
+                    prefixCv[0] = cv0.GetElement(fullChunks); prefixCv[1] = cv1.GetElement(fullChunks);
+                    prefixCv[2] = cv2.GetElement(fullChunks); prefixCv[3] = cv3.GetElement(fullChunks);
+                    prefixCv[4] = cv4.GetElement(fullChunks); prefixCv[5] = cv5.GetElement(fullChunks);
+                    prefixCv[6] = cv6.GetElement(fullChunks); prefixCv[7] = cv7.GetElement(fullChunks);
+                }
+            }
+        }
+
+        cv0 = Avx2.BlendVariable(cv0, latched[0], laneMask);
+        cv1 = Avx2.BlendVariable(cv1, latched[1], laneMask);
+        cv2 = Avx2.BlendVariable(cv2, latched[2], laneMask);
+        cv3 = Avx2.BlendVariable(cv3, latched[3], laneMask);
+        cv4 = Avx2.BlendVariable(cv4, latched[4], laneMask);
+        cv5 = Avx2.BlendVariable(cv5, latched[5], laneMask);
+        cv6 = Avx2.BlendVariable(cv6, latched[6], laneMask);
+        cv7 = Avx2.BlendVariable(cv7, latched[7], laneMask);
 
         // 8x8 transpose: word-major to chunk-major
         var t0 = Avx2.UnpackLow(cv0, cv1);

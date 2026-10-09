@@ -13,12 +13,6 @@ internal static class HashManySse41
 {
     public static bool IsSupported => Sse2.IsSupported && Ssse3.IsSupported;
 
-    private static readonly Vector128<byte> Rot16Mask128 = Vector128.Create(
-        (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
-
-    private static readonly Vector128<byte> Rot8Mask128 = Vector128.Create(
-        (byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<uint> RotateRight16(Vector128<uint> v)
     {
@@ -26,7 +20,7 @@ internal static class HashManySse41
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 16);
 #endif
-        return Ssse3.Shuffle(v.AsByte(), Rot16Mask128).AsUInt32();
+        return Ssse3.Shuffle(v.AsByte(), Vector128.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -46,7 +40,7 @@ internal static class HashManySse41
         if (Avx512F.VL.IsSupported)
             return Avx512F.VL.RotateRight(v, 8);
 #endif
-        return Ssse3.Shuffle(v.AsByte(), Rot8Mask128).AsUInt32();
+        return Ssse3.Shuffle(v.AsByte(), Vector128.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12)).AsUInt32();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

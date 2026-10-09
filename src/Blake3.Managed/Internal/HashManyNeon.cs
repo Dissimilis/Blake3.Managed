@@ -30,6 +30,14 @@ internal static class HashManyNeon
 {
     public static bool IsSupported => AdvSimd.Arm64.IsSupported;
 
+    /// <summary>NEON without SVE2, which takes its own paths for partial batches.</summary>
+    internal static bool IsSupportedWithoutSve2 =>
+#if NET10_0_OR_GREATER
+        IsSupported && !HashManySve2.IsSupported;
+#else
+        IsSupported;
+#endif
+
     private static readonly Vector128<byte> Rot16Mask128 = Vector128.Create(
         (byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
 
@@ -790,6 +798,306 @@ internal static class HashManyNeon
                 cv7 = AdvSimd.Xor(s7, s15);
             }
         }
+
+        // 4x4 transpose: word-major to chunk-major for output
+        Transpose4X4(cv0, cv1, cv2, cv3, out var o0, out var o1, out var o2, out var o3);
+        Transpose4X4(cv4, cv5, cv6, cv7, out var o4, out var o5, out var o6, out var o7);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(o0, ref outRef);
+        VectorCompat.Store(o4, ref outRef, 4);
+        if (numChunks > 1)
+        {
+            VectorCompat.Store(o1, ref outRef, 8);
+            VectorCompat.Store(o5, ref outRef, 12);
+        }
+        if (numChunks > 2)
+        {
+            VectorCompat.Store(o2, ref outRef, 16);
+            VectorCompat.Store(o6, ref outRef, 20);
+        }
+        if (numChunks > 3)
+        {
+            VectorCompat.Store(o3, ref outRef, 24);
+            VectorCompat.Store(o7, ref outRef, 28);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="HashManyPartial"/> for <paramref name="fullChunks"/> (2 or 3) whole chunks
+    /// followed by a partial chunk, which rides in lane <paramref name="fullChunks"/> instead of
+    /// being hashed afterwards on the scalar path. Writes <paramref name="fullChunks"/> + 1 CVs.
+    /// </summary>
+    /// <remarks>
+    /// The partial lane reads its own blocks until its final one, then a zero-padded copy of it;
+    /// its length and flags enter through a lane select, and its chaining value is latched after
+    /// the final block. Not for SVE2, which has its own two-chunk padding.
+    /// </remarks>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashManyPartialTail(ReadOnlySpan<byte> chunks, int fullChunks,
+                                       ReadOnlySpan<uint> key, ulong startCounter,
+                                       uint flags, Span<uint> cvs, Span<uint> prefixCv = default)
+    {
+        if (fullChunks < 2 || fullChunks > 3) throw new ArgumentOutOfRangeException(nameof(fullChunks));
+        int partialLen = chunks.Length - fullChunks * Blake3Constants.ChunkLen;
+        if (partialLen <= 0 || partialLen >= Blake3Constants.ChunkLen) throw new ArgumentException("Need a partial final chunk.", nameof(chunks));
+        int numChunks = fullChunks;
+        int lastBlock = (partialLen - 1) >> 6;
+        int lastLen = partialLen - (lastBlock << 6);
+
+        Vector128<uint>* padded = stackalloc Vector128<uint>[4];
+        padded[0] = default; padded[1] = default; padded[2] = default; padded[3] = default;
+        chunks.Slice(fullChunks * Blake3Constants.ChunkLen + (lastBlock << 6), lastLen)
+            .CopyTo(new Span<byte>(padded, Blake3Constants.BlockLen));
+        Vector128<uint>* latched = stackalloc Vector128<uint>[8];
+        var laneMask = AdvSimd.CompareEqual(Vector128.Create(0u, 1u, 2u, 3u), Vector128.Create((uint)fullChunks));
+
+        var rot8Mask = Vector128.Create((byte)1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12);
+        const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
+
+        // Unused lanes reread chunk zero, keeping partial batches inside the input span.
+        // All four CVs are computed; only numChunks of them are written out.
+        int offset1 = numChunks > 1 ? 1 * Blake3Constants.ChunkLen : 0;
+        int offset2 = numChunks > 2 ? 2 * Blake3Constants.ChunkLen : 0;
+        int offset3 = numChunks > 3 ? 3 * Blake3Constants.ChunkLen : 0;
+
+        Vector128<uint> cv0 = Vector128.Create(key[0]);
+        Vector128<uint> cv1 = Vector128.Create(key[1]);
+        Vector128<uint> cv2 = Vector128.Create(key[2]);
+        Vector128<uint> cv3 = Vector128.Create(key[3]);
+        Vector128<uint> cv4 = Vector128.Create(key[4]);
+        Vector128<uint> cv5 = Vector128.Create(key[5]);
+        Vector128<uint> cv6 = Vector128.Create(key[6]);
+        Vector128<uint> cv7 = Vector128.Create(key[7]);
+
+        var counterLo = Vector128.Create(
+            (uint)(startCounter + 0), (uint)(startCounter + 1),
+            (uint)(startCounter + 2), (uint)(startCounter + 3));
+        var counterHi = Vector128.Create(
+            (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
+            (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32));
+
+        var ivVec0 = Vector128.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector128.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector128.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector128.Create(Blake3Constants.Iv3);
+        var blockLenVec = Vector128.Create((uint)Blake3Constants.BlockLen);
+
+        fixed (byte* chunksPtr = chunks)
+        {
+            Vector128<uint>* m = stackalloc Vector128<uint>[17]; // [16]: the per-round barrier slot
+
+            for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
+            {
+                byte* blockBase = chunksPtr + blockIdx * 64;
+                byte* partialBlock = blockIdx < lastBlock
+                    ? chunksPtr + fullChunks * Blake3Constants.ChunkLen + blockIdx * 64
+                    : (byte*)padded;
+                uint partLen = blockIdx < lastBlock ? 64u : (uint)lastLen;
+                uint partFlags = flags | (blockIdx == 0 ? Blake3Constants.ChunkStart : 0u)
+                                       | (blockIdx < lastBlock ? 0u : Blake3Constants.ChunkEnd);
+
+                // Load 4 words (16 bytes) from each of 4 chunks, then transpose
+                // Lower 8 words (0-7): two groups of 4
+                var r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen);
+                var r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1));
+                var r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2));
+                var r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3));
+                Transpose4X4(r0, r1, r2, r3, out m[0], out m[1], out m[2], out m[3]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 16);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 16);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 16);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 16);
+                Transpose4X4(r0, r1, r2, r3, out m[4], out m[5], out m[6], out m[7]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 32);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 32);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 32);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 32);
+                Transpose4X4(r0, r1, r2, r3, out m[8], out m[9], out m[10], out m[11]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 48);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 48);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 48);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 48);
+                Transpose4X4(r0, r1, r2, r3, out m[12], out m[13], out m[14], out m[15]);
+
+                // Block flags
+                uint blockFlags = flags;
+                if (blockIdx == 0) blockFlags |= Blake3Constants.ChunkStart;
+                if (blockIdx == blocksPerChunk - 1) blockFlags |= Blake3Constants.ChunkEnd;
+                var flagsVec = Vector128.Create(blockFlags);
+
+                Vector128<uint> s0 = cv0, s1 = cv1, s2 = cv2, s3 = cv3;
+                Vector128<uint> s4 = cv4, s5 = cv5, s6 = cv6, s7 = cv7;
+                Vector128<uint> s8 = ivVec0, s9 = ivVec1, s10 = ivVec2, s11 = ivVec3;
+                Vector128<uint> s12 = counterLo, s13 = counterHi;
+                Vector128<uint> s14 = AdvSimd.BitwiseSelect(laneMask, Vector128.Create(partLen), blockLenVec);
+                Vector128<uint> s15 = AdvSimd.BitwiseSelect(laneMask, Vector128.Create(partFlags), flagsVec);
+
+                // Round 0
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[8]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 1
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[7]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 2
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[11]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[5]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 3
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 4
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[12]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[10]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 5
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[6]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+                // Round 6
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s0).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s1).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s2).AsInt32()).AsUInt32(); s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s3).AsInt32()).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[15]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s0).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s1).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s2).AsByte(), rot8Mask).AsUInt32(); s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s3).AsByte(), rot8Mask).AsUInt32();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                { var t = AdvSimd.Xor(s4, s8); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s5, s9); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s10); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s11); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = AdvSimd.ReverseElement16(AdvSimd.Xor(s15, s0).AsInt32()).AsUInt32(); s12 = AdvSimd.ReverseElement16(AdvSimd.Xor(s12, s1).AsInt32()).AsUInt32(); s13 = AdvSimd.ReverseElement16(AdvSimd.Xor(s13, s2).AsInt32()).AsUInt32(); s14 = AdvSimd.ReverseElement16(AdvSimd.Xor(s14, s3).AsInt32()).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 12), AdvSimd.ShiftLeftLogical(t, 20)); }
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s4);
+                s15 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s15, s0).AsByte(), rot8Mask).AsUInt32(); s12 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s12, s1).AsByte(), rot8Mask).AsUInt32(); s13 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s13, s2).AsByte(), rot8Mask).AsUInt32(); s14 = AdvSimd.Arm64.VectorTableLookup(AdvSimd.Xor(s14, s3).AsByte(), rot8Mask).AsUInt32();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                { var t = AdvSimd.Xor(s5, s10); s5 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s6, s11); s6 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s7, s8); s7 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); } { var t = AdvSimd.Xor(s4, s9); s4 = AdvSimd.Or(AdvSimd.ShiftRightLogical(t, 7), AdvSimd.ShiftLeftLogical(t, 25)); }
+                m[16] = s0; // barrier: stops the message loads being hoisted
+
+                // Post-XOR: only chaining value (first 8 words)
+                cv0 = AdvSimd.Xor(s0, s8);
+                cv1 = AdvSimd.Xor(s1, s9);
+                cv2 = AdvSimd.Xor(s2, s10);
+                cv3 = AdvSimd.Xor(s3, s11);
+                cv4 = AdvSimd.Xor(s4, s12);
+                cv5 = AdvSimd.Xor(s5, s13);
+                cv6 = AdvSimd.Xor(s6, s14);
+                cv7 = AdvSimd.Xor(s7, s15);
+
+                if (blockIdx == lastBlock)
+                {
+                    latched[0] = cv0; latched[1] = cv1; latched[2] = cv2; latched[3] = cv3;
+                    latched[4] = cv4; latched[5] = cv5; latched[6] = cv6; latched[7] = cv7;
+                }
+                else if (blockIdx == lastBlock - 1 && !prefixCv.IsEmpty)
+                {
+                    prefixCv[0] = cv0.GetElement(fullChunks); prefixCv[1] = cv1.GetElement(fullChunks);
+                    prefixCv[2] = cv2.GetElement(fullChunks); prefixCv[3] = cv3.GetElement(fullChunks);
+                    prefixCv[4] = cv4.GetElement(fullChunks); prefixCv[5] = cv5.GetElement(fullChunks);
+                    prefixCv[6] = cv6.GetElement(fullChunks); prefixCv[7] = cv7.GetElement(fullChunks);
+                }
+            }
+        }
+
+        cv0 = AdvSimd.BitwiseSelect(laneMask, latched[0], cv0);
+        cv1 = AdvSimd.BitwiseSelect(laneMask, latched[1], cv1);
+        cv2 = AdvSimd.BitwiseSelect(laneMask, latched[2], cv2);
+        cv3 = AdvSimd.BitwiseSelect(laneMask, latched[3], cv3);
+        cv4 = AdvSimd.BitwiseSelect(laneMask, latched[4], cv4);
+        cv5 = AdvSimd.BitwiseSelect(laneMask, latched[5], cv5);
+        cv6 = AdvSimd.BitwiseSelect(laneMask, latched[6], cv6);
+        cv7 = AdvSimd.BitwiseSelect(laneMask, latched[7], cv7);
+        numChunks = fullChunks + 1;
 
         // 4x4 transpose: word-major to chunk-major for output
         Transpose4X4(cv0, cv1, cv2, cv3, out var o0, out var o1, out var o2, out var o3);

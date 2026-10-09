@@ -44,6 +44,12 @@ internal static class Blake3Core
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void HashChunkCv(ReadOnlySpan<uint> key, ReadOnlySpan<byte> chunk, ulong chunkCounter, uint flags, Span<uint> cv)
     {
+        if (!CompressSse41.IsSupported && BitConverter.IsLittleEndian)
+        {
+            CompressScalar.HashChunk(key, chunkCounter, flags, false, chunk.Slice(0, Blake3Constants.ChunkLen), cv);
+            return;
+        }
+
         key[..8].CopyTo(cv);
 
         for (int blockIdx = 0; blockIdx < 15; blockIdx++)
@@ -72,6 +78,17 @@ internal static class Blake3Core
     internal static void HashOneChunkRoot32(ReadOnlySpan<uint> key, ulong chunkCounter, uint flags,
         Span<byte> output, ReadOnlySpan<byte> input)
     {
+        if (!CompressSse41.IsSupported && BitConverter.IsLittleEndian
+            && input.Length > Blake3Constants.BlockLen)
+        {
+            // The scalar path (every ARM64 CPU) for more than one block: one fused loop with
+            // the chaining value in registers. A single block keeps the direct path below,
+            // which measured faster for 4- and 64-byte inputs on a Cortex-A73.
+            CompressScalar.HashChunk(key, chunkCounter, flags, true, input,
+                MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
+
         if (input.Length <= Blake3Constants.BlockLen)
         {
             // One block, which is the overwhelmingly common short-input case.
@@ -84,7 +101,16 @@ internal static class Blake3Core
                 return;
             }
 
-            // Keyed, derive-key, or no SSE: the generic compressor needs a padded block. No
+            if (CompressSse41.IsSupported && input.Length != Blake3Constants.BlockLen)
+            {
+                // Keyed or derive-key short input: the message is assembled in registers instead
+                // of a padded stack block. A full 64-byte block is compressed where it lies below.
+                CompressSse41.HashChunkRoot32(key, chunkCounter, flags, input,
+                    MemoryMarshal.Cast<byte, uint>(output));
+                return;
+            }
+
+            // No SSE: the generic compressor needs a padded block. No
             // compression has happened yet, so the chaining value is still the key and is passed
             // straight through rather than copied into a scratch buffer.
             uint singleFlags = flags | Blake3Constants.ChunkStart
@@ -112,6 +138,13 @@ internal static class Blake3Core
             // registers across every block instead of round-tripping it through memory. Placed
             // after the single-block case, which has a cheaper constant-state path of its own.
             CompressSse41.HashChunkRoot32Iv(input, MemoryMarshal.Cast<byte, uint>(output));
+            return;
+        }
+
+        if (CompressSse41.IsSupported)
+        {
+            CompressSse41.HashChunkRoot32(key, chunkCounter, flags, input,
+                MemoryMarshal.Cast<byte, uint>(output));
             return;
         }
 
@@ -158,7 +191,7 @@ internal static class Blake3Core
     /// but every write here stays within the copied region anyway.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CopyUpTo64(ReadOnlySpan<byte> src, Span<byte> dst)
+    internal static void CopyUpTo64(ReadOnlySpan<byte> src, Span<byte> dst)
     {
         int n = src.Length;
         ref byte s = ref MemoryMarshal.GetReference(src);
@@ -204,7 +237,7 @@ internal static class Blake3Core
     /// size-dispatch costs a visible fraction of it. Four 128-bit stores have no call at all.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ZeroBlock(Span<byte> block)
+    internal static void ZeroBlock(Span<byte> block)
     {
         ref byte dst = ref MemoryMarshal.GetReference(block);
         Unsafe.WriteUnaligned(ref dst, default(Vector128<byte>));
@@ -443,10 +476,60 @@ internal static class Blake3Core
 
                 int want = Blake3Constants.BlockLen - _blockLen;
                 int take = Math.Min(want, remaining.Length);
-                remaining.Slice(0, take).CopyTo(BlockSpan.Slice(_blockLen));
+                if (_blockLen == 0 && take < Blake3Constants.BlockLen)
+                {
+                    // The usual short write into an empty block: inline stores rather than an
+                    // out-of-line Memmove call.
+                    CopyUpTo64(remaining.Slice(0, take), BlockSpan);
+                }
+                else
+                {
+                    remaining.Slice(0, take).CopyTo(BlockSpan.Slice(_blockLen));
+                }
                 _blockLen += (byte)take;
                 remaining = remaining.Slice(take);
             }
+        }
+
+        /// <summary>
+        /// The 32-byte root digest of an input that is this chunk alone, written straight into
+        /// <paramref name="output"/> (little-endian only).
+        /// </summary>
+        /// <remarks>
+        /// What <c>CreateOutput().RootOutputBytes(output)</c> computes, without materialising the
+        /// <see cref="Output"/>: that copies the chaining value and the whole block into a new
+        /// struct, returns it by value, and only then compresses. For a short incremental hash
+        /// those copies are a visible part of the call.
+        /// </remarks>
+        [SkipLocalsInit]
+        public void RootBytes32(Span<byte> output)
+        {
+            uint flags = _flags | StartFlag | Blake3Constants.ChunkEnd | Blake3Constants.Root;
+            if (CompressSse41.IsSupported)
+            {
+                CompressSse41.CompressPartialBlockRoot32(CvSpan, BlockSpan.Slice(0, _blockLen),
+                    ChunkCounter, flags, MemoryMarshal.Cast<byte, uint>(output));
+                return;
+            }
+
+            if (_blockLen < Blake3Constants.BlockLen)
+                BlockSpan.Slice(_blockLen).Clear();
+
+            CompressCv(CvSpan, MemoryMarshal.Cast<byte, uint>(BlockSpan), ChunkCounter,
+                _blockLen, flags, MemoryMarshal.Cast<byte, uint>(output));
+        }
+
+        /// <summary>
+        /// Sets the state this chunk reaches after absorbing <paramref name="blocks"/> whole blocks
+        /// (whose resulting chaining value is <paramref name="cv"/>) and then the bytes of
+        /// <paramref name="lastBlock"/> (1..64), which stay buffered as usual.
+        /// </summary>
+        public void SetPrefix(ReadOnlySpan<uint> cv, int blocks, ReadOnlySpan<byte> lastBlock)
+        {
+            cv.Slice(0, 8).CopyTo(CvSpan);
+            _blocksCompressed = (byte)blocks;
+            lastBlock.CopyTo(BlockSpan);
+            _blockLen = (byte)lastBlock.Length;
         }
 
         [SkipLocalsInit]
@@ -1271,6 +1354,42 @@ internal static class Blake3Core
         }
 #endif
 
+        /// <summary>
+        /// After a batch kernel hashed the whole chunks before <paramref name="partial"/> and carried
+        /// the partial chunk in a spare lane: starts that chunk from <paramref name="prefixCv"/>, its
+        /// state before its final block, instead of compressing its blocks again one at a time.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void StartPartialChunk(ulong counter, ReadOnlySpan<uint> prefixCv, ReadOnlySpan<byte> partial)
+        {
+            int lastBlock = (partial.Length - 1) >> 6;
+            _chunkState = new ChunkState(KeySpan, counter, _flags);
+            _chunkState.SetPrefix(prefixCv, lastBlock, partial.Slice(lastBlock * Blake3Constants.BlockLen));
+        }
+
+        /// <summary>
+        /// Two or three whole chunks and the partial chunk after them through the 4-way NEON
+        /// kernel, the partial chunk taking the spare lane; consumes all of
+        /// <paramref name="length"/> bytes.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void UpdateNeonPartialTail(ref byte start, int length, ref uint batch)
+        {
+            // Raw arguments: spans passed to a call need stack temporaries, and those appeared in
+            // x86's Update frame even though this call is dead code there.
+            ReadOnlySpan<byte> remaining = MemoryMarshal.CreateReadOnlySpan(ref start, length);
+            Span<uint> batchCvs = MemoryMarshal.CreateSpan(ref batch, 64 * 8);
+            Span<uint> prefix = stackalloc uint[8];
+            ulong startCounter = _chunkState.ChunkCounter;
+            int chunks = remaining.Length / Blake3Constants.ChunkLen;
+            HashManyNeon.HashManyPartialTail(remaining, chunks, KeySpan, startCounter, _flags, batchCvs, prefix);
+            for (int i = 0; i < chunks; i++)
+            {
+                AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
+            }
+            StartPartialChunk(startCounter + (ulong)chunks, prefix, remaining.Slice(chunks * Blake3Constants.ChunkLen));
+        }
+
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void Update(ReadOnlySpan<byte> input)
@@ -1335,8 +1454,12 @@ internal static class Blake3Core
 
                     // The interleaved serial kernel measured 6.6% slower than this one for a lone
                     // eight-chunk batch (8 KB Update).
+                    int tail = remaining.Length - chunks * Blake3Constants.ChunkLen;
+                    bool partialLane = chunks < 8 && tail > Blake3Constants.BlockLen;
                     if (chunks == 8)
                         HashManyAvx2.HashMany(remaining, 8, KeySpan, startCounter, _flags, batchCvs);
+                    else if (partialLane)
+                        HashManyAvx2.HashManyPartialTail(remaining, chunks, KeySpan, startCounter, _flags, batchCvs, chunkCv);
                     else
                         HashManyAvx2.HashManyPartial(remaining, chunks, KeySpan, startCounter, _flags, batchCvs);
 
@@ -1346,6 +1469,15 @@ internal static class Blake3Core
                     for (int i = 0; i < cvsToAdd; i++)
                     {
                         AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
+                    }
+
+                    if (partialLane)
+                    {
+                        // The partial chunk's blocks were compressed in the spare lane.
+                        StartPartialChunk(startCounter + (ulong)chunks, chunkCv,
+                            remaining.Slice(Blake3Constants.ChunkLen * chunks));
+                        remaining = default;
+                        continue;
                     }
 
                     _chunkState = new ChunkState(KeySpan, startCounter + (ulong)chunks, _flags);
@@ -1368,6 +1500,33 @@ internal static class Blake3Core
                 {
                     ulong startCounter = _chunkState.ChunkCounter;
                     int chunks = Math.Min(4, remaining.Length / Blake3Constants.ChunkLen);
+                    if (chunks == 4 && HashManyAvx2.HasAvx512Vl && remaining.Length < 5 * Blake3Constants.ChunkLen
+                        && remaining.Length - 4 * Blake3Constants.ChunkLen > 7 * Blake3Constants.BlockLen)
+                    {
+                        // Four whole chunks and a long partial one: the eight-way kernel's fifth
+                        // lane carries the partial chunk, as in the one-shot tree.
+                        HashManyAvx2.HashManyPartialTail(remaining, 4, KeySpan, startCounter, _flags, batchCvs, chunkCv);
+                        for (int i = 0; i < 4; i++)
+                        {
+                            AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
+                        }
+                        StartPartialChunk(startCounter + 4, chunkCv, remaining.Slice(4 * Blake3Constants.ChunkLen));
+                        remaining = default;
+                        continue;
+                    }
+
+                    if (chunks == 3 && remaining.Length - 3 * Blake3Constants.ChunkLen > Blake3Constants.BlockLen)
+                    {
+                        HashFourAvx2.HashFourPartial(remaining, 3, KeySpan, startCounter, _flags, batchCvs, chunkCv);
+                        for (int i = 0; i < 3; i++)
+                        {
+                            AddChunkCv(batchCvs.Slice(i * 8, 8), startCounter - _chunkBase + (ulong)i + 1);
+                        }
+                        StartPartialChunk(startCounter + 3, chunkCv, remaining.Slice(3 * Blake3Constants.ChunkLen));
+                        remaining = default;
+                        continue;
+                    }
+
                     HashFourAvx2.HashFour(remaining, chunks, KeySpan, startCounter, _flags, batchCvs);
 
                     bool hasMore = remaining.Length > Blake3Constants.ChunkLen * chunks;
@@ -1420,6 +1579,24 @@ internal static class Blake3Core
                     continue;
                 }
 
+                // Two or three whole chunks and a partial one on ARM (not SVE2): the partial chunk
+                // takes the 4-way kernel's spare lane. Out of line and apart from the constant-count
+                // branch below, so x86's Update compiles as before.
+                if (HashManyNeon.IsSupported
+#if NET10_0_OR_GREATER
+                    && !HashManySve2.IsSupported
+#endif
+                    && _chunkState.Len == 0
+                    && remaining.Length < Blake3Constants.ChunkLen * 4
+                    && remaining.Length % Blake3Constants.ChunkLen > Blake3Constants.BlockLen
+                    && remaining.Length > Blake3Constants.ChunkLen * 2 + 7 * Blake3Constants.BlockLen)
+                {
+                    UpdateNeonPartialTail(ref MemoryMarshal.GetReference(remaining), remaining.Length,
+                        ref MemoryMarshal.GetReference(batchCvs));
+                    remaining = default;
+                    continue;
+                }
+
                 // Exactly three whole chunks on ARM through the 4-way NEON kernel. Two chunks
                 // measured 24-28% slower than scalar there; see HashManyNeon.HashManyPartial.
                 // SVE2 would gain on two chunks as the one-shot tree does, but making this count
@@ -1454,6 +1631,17 @@ internal static class Blake3Core
                     && remaining.Length >= Blake3Constants.ChunkLen * 2)
                 {
                     ulong startCounter = _chunkState.ChunkCounter;
+                    if (HashFourAvx2.IsSupported && remaining.Length < Blake3Constants.ChunkLen * 3
+                        && remaining.Length > Blake3Constants.ChunkLen * 2 + 3 * Blake3Constants.BlockLen)
+                    {
+                        HashFourAvx2.HashFourPartial(remaining, 2, KeySpan, startCounter, _flags, batchCvs, chunkCv);
+                        AddChunkCv(batchCvs.Slice(0, 8), startCounter - _chunkBase + 1);
+                        AddChunkCv(batchCvs.Slice(8, 8), startCounter - _chunkBase + 2);
+                        StartPartialChunk(startCounter + 2, chunkCv, remaining.Slice(2 * Blake3Constants.ChunkLen));
+                        remaining = default;
+                        continue;
+                    }
+
                     HashTwoAvx2.HashTwo(remaining, KeySpan, startCounter, _flags, batchCvs);
                     AddChunkCv(batchCvs.Slice(0, 8), startCounter - _chunkBase + 1);
                     bool hasMore = remaining.Length > Blake3Constants.ChunkLen * 2;
@@ -1463,6 +1651,19 @@ internal static class Blake3Core
                     if (!hasMore)
                         DeferChunkCv(batchCvs.Slice(8, 8));
                     remaining = remaining.Slice(Blake3Constants.ChunkLen * 2);
+                    continue;
+                }
+
+                if (HashTwoAvx2.IsSupported && _chunkState.Len == 0
+                    && remaining.Length > Blake3Constants.ChunkLen + 2 * Blake3Constants.BlockLen
+                    && remaining.Length < 2 * Blake3Constants.ChunkLen)
+                {
+                    // One whole chunk and the partial one after it, in the pair kernel's two lanes.
+                    ulong counter = _chunkState.ChunkCounter;
+                    HashTwoAvx2.HashOneAndPartial(remaining, KeySpan, counter, _flags, batchCvs, chunkCv);
+                    AddChunkCv(batchCvs.Slice(0, 8), counter + 1 - _chunkBase);
+                    StartPartialChunk(counter + 1, chunkCv, remaining.Slice(Blake3Constants.ChunkLen));
+                    remaining = default;
                     continue;
                 }
 
@@ -1628,6 +1829,18 @@ internal static class Blake3Core
             Update(input.Slice(consumedChunks * chunkLen));
         }
 
+        /// <summary>
+        /// Writes the 32-byte digest and returns true when the input so far is a single chunk;
+        /// otherwise writes nothing and returns false.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool TryFinalizeSingleChunk32(Span<byte> output)
+        {
+            if (_hasPendingCv || _cvStackLen != 0 || !BitConverter.IsLittleEndian) return false;
+            _chunkState.RootBytes32(output);
+            return true;
+        }
+
         [SkipLocalsInit]
         public Output Finalize()
         {
@@ -1703,18 +1916,35 @@ internal static class Blake3Core
         /// </remarks>
         public void Clear()
         {
-            ulong chunks = _chunkState.ChunkCounter - _chunkBase + 1;
-            int usedSlots = Math.Min(Blake3Constants.MaxDepth,
-                64 - BitOperations.LeadingZeroCount(chunks) + 1);
             KeySpan.Clear();
-            CvStackSpan.Slice(0, usedSlots * 8).Clear();
+            ClearUsedCvStack();
             _chunkState = default;
             _cvStackLen = 0;
             _hasPendingCv = false;
         }
 
+        /// <summary>
+        /// Zeroes every CV-stack slot written since the stack was last cleared.
+        /// </summary>
+        /// <remarks>
+        /// Slots are only written once a chunk has completed, which moves the chunk counter past
+        /// <c>_chunkBase</c>; <see cref="Reset"/> clears the stack before moving the counter back,
+        /// so a counter still at the base means nothing needs clearing -- the common case for a
+        /// short hash, which then skips an out-of-line memset.
+        /// </remarks>
+        private void ClearUsedCvStack()
+        {
+            if (_chunkState.ChunkCounter == _chunkBase) return;
+
+            ulong chunks = _chunkState.ChunkCounter - _chunkBase + 1;
+            int usedSlots = Math.Min(Blake3Constants.MaxDepth,
+                64 - BitOperations.LeadingZeroCount(chunks) + 1);
+            CvStackSpan.Slice(0, usedSlots * 8).Clear();
+        }
+
         public void Reset()
         {
+            ClearUsedCvStack();
             _cvStackLen = 0;
             _hasPendingCv = false;
             _chunkState = new ChunkState(KeySpan, _chunkBase, _flags);
