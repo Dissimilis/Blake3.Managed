@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Blake3.Managed\Blake3.Managed.csproj" />
+    <RuntimeHostConfigurationOption Include="Blake3.Managed.TuneForCortexA510"
+        Value="$(TuneForCortexA510)" Condition="'$(TuneForCortexA510)' != ''" />
   </ItemGroup>
 
   <ItemGroup>

@@ -762,6 +762,11 @@ internal static class Blake3Core
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void RootOutputBytesAtSve2(ulong seekOffset, Span<byte> output)
         {
+            if (ArmTuning.CortexA510)
+            {
+                RootOutputBytesAtSve2Four(seekOffset, output);
+                return;
+            }
             int outputLen = output.Length;
             int pos = 0;
             ulong blockCounter = seekOffset / 64;
@@ -795,6 +800,59 @@ internal static class Blake3Core
             {
                 Span<byte> batch = stackalloc byte[512];
                 OutputManySve2.HashOutput8(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags, batch);
+                int take = outputLen - pos;
+                batch.Slice(0, take).CopyTo(output.Slice(pos));
+                pos += take;
+            }
+
+            while (pos < outputLen)
+            {
+                CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags | Blake3Constants.Root, state);
+                int toCopy = Math.Min(64, outputLen - pos);
+                MemoryMarshal.AsBytes(state).Slice(0, toCopy).CopyTo(output.Slice(pos));
+                pos += toCopy;
+                blockCounter++;
+            }
+        }
+
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void RootOutputBytesAtSve2Four(ulong seekOffset, Span<byte> output)
+        {
+            int outputLen = output.Length;
+            int pos = 0;
+            ulong blockCounter = seekOffset / 64;
+            int byteOffset = (int)(seekOffset % 64);
+
+            Span<uint> state = stackalloc uint[16];
+
+            if (byteOffset != 0 && outputLen > 0)
+            {
+                CompressInPlace(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags | Blake3Constants.Root, state);
+                int take = Math.Min(64 - byteOffset, outputLen);
+                MemoryMarshal.AsBytes(state).Slice(byteOffset, take).CopyTo(output);
+                pos = take;
+                blockCounter++;
+            }
+
+            if (outputLen - pos >= 256)
+            {
+                int batchBytes = (outputLen - pos) & ~255;
+                OutputManySve2.HashOutput4(InputCvSpan, BlockSpan, blockCounter, _blockLen,
+                    _flags, output.Slice(pos, batchBytes));
+                pos += batchBytes;
+                blockCounter += (ulong)(batchBytes / 64);
+            }
+
+            // A 192-255 byte remainder uses one four-block batch and copies only valid bytes.
+            // Smaller remainders stay scalar to avoid the measured 128-byte regression.
+            if (outputLen - pos >= 3 * Blake3Constants.BlockLen)
+            {
+                Span<byte> batch = stackalloc byte[256];
+                OutputManySve2.HashOutput4(InputCvSpan, BlockSpan, blockCounter, _blockLen,
                     _flags, batch);
                 int take = outputLen - pos;
                 batch.Slice(0, take).CopyTo(output.Slice(pos));
@@ -978,6 +1036,73 @@ internal static class Blake3Core
                     new ReadOnlySpan<byte>(_input + offset, 8 * chunkLen),
                     8, key, _startCounter + (ulong)(_subtrees * subtreeChunks + batch * 8),
                     _flags, _cvBuffer.AsSpan(_subtrees * 8 + batch * 64, 64));
+            }
+        }
+    }
+
+    private sealed unsafe class JoinJobArm : Blake3Tree.FlatJob
+    {
+        private readonly byte* _input;
+        private readonly uint* _key;
+        private readonly uint[] _cvBuffer;
+        private readonly ulong _startCounter;
+        private readonly uint _flags;
+        private readonly int _subtrees;
+        private readonly int _subtreeChunks;
+
+        public JoinJobArm(int items, byte* input, uint* key, uint[] cvBuffer,
+            ulong startCounter, uint flags, int subtrees, int subtreeChunks)
+            : base(items)
+        {
+            _input = input;
+            _key = key;
+            _cvBuffer = cvBuffer;
+            _startCounter = startCounter;
+            _flags = flags;
+            _subtrees = subtrees;
+            _subtreeChunks = subtreeChunks;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+        private static void HashEight(ReadOnlySpan<byte> input, ReadOnlySpan<uint> key,
+            ulong counter, uint flags, Span<uint> cvs)
+        {
+#if NET10_0_OR_GREATER
+            if (HashManySve2.IsSupported)
+            {
+                HashManySve2.HashMany8(input, key, counter, flags, cvs);
+                return;
+            }
+#endif
+            HashManyNeon.HashMany(input.Slice(0, 4096), 4, key, counter, flags, cvs.Slice(0, 32));
+            HashManyNeon.HashMany(input.Slice(4096, 4096), 4, key, counter + 4, flags, cvs.Slice(32, 32));
+        }
+
+        protected override void Process(int item)
+        {
+            const int chunkLen = Blake3Constants.ChunkLen;
+            int subtreeChunks = _subtreeChunks;
+            long subtreeLen = (long)subtreeChunks * chunkLen;
+            var key = new ReadOnlySpan<uint>(_key, 8);
+            if (item < _subtrees)
+            {
+                byte* subtreeBase = _input + (long)item * subtreeLen;
+                ulong counter = _startCounter + (ulong)(item * subtreeChunks);
+                Span<uint> buffer = stackalloc uint[64 * 8];
+                Span<uint> cvs = buffer.Slice(0, subtreeChunks * 8);
+                for (int b = 0; b < subtreeChunks / 8; b++)
+                    HashEight(new ReadOnlySpan<byte>(subtreeBase + b * 8 * chunkLen, 8 * chunkLen),
+                        key, counter + (ulong)(b * 8), _flags, cvs.Slice(b * 64, 64));
+                ReduceCvs(cvs, subtreeChunks, key, _flags);
+                cvs.Slice(0, 8).CopyTo(_cvBuffer.AsSpan(item * 8, 8));
+            }
+            else
+            {
+                int batch = item - _subtrees;
+                long offset = (long)_subtrees * subtreeLen + (long)batch * 8 * chunkLen;
+                HashEight(new ReadOnlySpan<byte>(_input + offset, 8 * chunkLen), key,
+                    _startCounter + (ulong)(_subtrees * subtreeChunks + batch * 8), _flags,
+                    _cvBuffer.AsSpan(_subtrees * 8 + batch * 64, 64));
             }
         }
     }
@@ -1586,6 +1711,7 @@ internal static class Blake3Core
 #if NET10_0_OR_GREATER
                     && !HashManySve2.IsSupported
 #endif
+                    && !ArmTuning.UseScalarNeonTails
                     && _chunkState.Len == 0
                     && remaining.Length < Blake3Constants.ChunkLen * 4
                     && remaining.Length % Blake3Constants.ChunkLen > Blake3Constants.BlockLen
@@ -1601,7 +1727,7 @@ internal static class Blake3Core
                 // measured 24-28% slower than scalar there; see HashManyNeon.HashManyPartial.
                 // SVE2 would gain on two chunks as the one-shot tree does, but making this count
                 // variable added a stack slot and a zero-init to x86's Update (2026-09-23).
-                if (HashManyNeon.IsSupported && _chunkState.Len == 0
+                if (HashManyNeon.IsSupported && !ArmTuning.UseScalarNeonTails && _chunkState.Len == 0
                     && remaining.Length >= Blake3Constants.ChunkLen * 3)
                 {
                     ulong startCounter = _chunkState.ChunkCounter;
@@ -1701,6 +1827,11 @@ internal static class Blake3Core
 
             if (!HashManyAvx2.IsSupported || _chunkState.Len > 0)
             {
+                if (System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.IsSupported && ArmTuning.CortexA510)
+                {
+                    UpdateWithJoinArm(input);
+                    return;
+                }
                 Update(input);
                 return;
             }
@@ -1766,6 +1897,126 @@ internal static class Blake3Core
             }
 
             UpdateWithJoinCore(input, subtreeChunks, subtrees, tailBatches, items);
+        }
+
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+        private unsafe void UpdateWithJoinArm(ReadOnlySpan<byte> input)
+        {
+            const int chunkLen = Blake3Constants.ChunkLen;
+
+            if (_chunkState.Len > 0 || input.Length <= Blake3Tree.MaxUsefulLength)
+            {
+                Update(input);
+                return;
+            }
+
+            // Chunks we can hash in parallel; the final chunk (possibly partial) must
+            // stay in _chunkState so Finalize can produce the root.
+            int usableChunks = input.Length % chunkLen == 0
+                ? input.Length / chunkLen - 1
+                : input.Length / chunkLen;
+
+            // Use canonical 16-chunk units for smaller calls and 64-chunk units for larger calls.
+            int subtreeChunks = usableChunks >= 2 * 64 ? 64 : 16;
+
+            // The parallel path needs a counter aligned to the unit so each subtree is canonical
+            // and can be reduced to a single CV by its worker.
+            if ((_chunkState.ChunkCounter & (ulong)(subtreeChunks - 1)) != 0)
+            {
+                Update(input);
+                return;
+            }
+
+            int subtrees = usableChunks / subtreeChunks;
+            int tailBatches = (usableChunks - subtrees * subtreeChunks) / 8;
+            int items = subtrees + tailBatches;
+
+            if (subtrees < 1 || items < 2)
+            {
+                Update(input);
+                return;
+            }
+
+            // Count every eligible ARM Join call, including serial fallbacks under load.
+            // Only the first entrant may fan out; ordinary ARM Hash calls are not all counted.
+            int others = Blake3Tree.EnterMidSize();
+            try
+            {
+                if (others >= 1)
+                {
+                    Update(input);
+                    return;
+                }
+
+                UpdateWithJoinCoreArm(input, subtreeChunks, subtrees, tailBatches, items);
+            }
+            finally
+            {
+                Blake3Tree.LeaveMidSize();
+            }
+
+        }
+
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+        private unsafe void UpdateWithJoinCoreArm(ReadOnlySpan<byte> input,
+            int subtreeChunks, int subtrees, int tailBatches, int items)
+        {
+            const int chunkLen = Blake3Constants.ChunkLen;
+            int shift = subtreeChunks == 64 ? 6 : 4;
+
+            ulong startCounter = _chunkState.ChunkCounter;
+            uint flagsCopy = _flags;
+            int subtreesLocal = subtrees;
+
+            uint* keyPtr = stackalloc uint[8];
+            KeySpan.CopyTo(new Span<uint>(keyPtr, 8));
+            nint keyAddr = (nint)keyPtr;
+
+            // Layout: one CV per subtree, then 8 CVs per tail batch.
+            var cvBuffer = ArrayPool<uint>.Shared.Rent(subtrees * 8 + tailBatches * 64);
+
+            try
+            {
+                fixed (byte* inputBase = &Unsafe.AsRef(in MemoryMarshal.GetReference(input)))
+                {
+                    // The same flat fan-out the one-shot tree uses, rather than Parallel.For.
+                    // Parallel.For's replicating tasks wake the pool one hop at a time, which
+                    // measured 18-27% slower there; this path was simply never migrated with it.
+                    // RunOnPool returns only once every item has settled, so the pinned input
+                    // and the stack-allocated key stay valid for exactly as long as before.
+                    new JoinJobArm(items, inputBase, (uint*)keyAddr, cvBuffer, startCounter,
+                        flagsCopy, subtreesLocal, subtreeChunks).RunOnPool(Environment.ProcessorCount);
+                }
+
+                Span<uint> tempCv = stackalloc uint[8];
+
+                // Merge subtree CVs (units of subtreeChunks chunks; see AddChunkCv).
+                for (int i = 0; i < subtrees; i++)
+                {
+                    cvBuffer.AsSpan(i * 8, 8).CopyTo(tempCv);
+                    AddChunkCv(tempCv, ((startCounter - _chunkBase) >> shift) + (ulong)i + 1);
+                }
+
+                // Merge tail batch chunk CVs (units of 1 chunk).
+                ulong tailStart = startCounter - _chunkBase + (ulong)(subtrees * subtreeChunks);
+                for (int j = 0; j < tailBatches * 8; j++)
+                {
+                    cvBuffer.AsSpan(subtrees * 8 + j * 8, 8).CopyTo(tempCv);
+                    AddChunkCv(tempCv, tailStart + (ulong)j + 1);
+                }
+            }
+            finally
+            {
+                ArrayPool<uint>.Shared.Return(cvBuffer, clearArray: true);
+            }
+
+            int consumedChunks = subtrees * subtreeChunks + tailBatches * 8;
+            _chunkState = new ChunkState(KeySpan, startCounter + (ulong)consumedChunks, _flags);
+
+            // Remaining < 8 full chunks plus the reserved final chunk; Update handles it.
+            Update(input.Slice(consumedChunks * chunkLen));
         }
 
         [SkipLocalsInit]

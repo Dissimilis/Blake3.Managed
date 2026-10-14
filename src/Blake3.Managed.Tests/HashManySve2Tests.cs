@@ -73,8 +73,10 @@ public class HashManySve2Tests
         }
     }
 
-    [Fact]
-    public void OutputBlocksMatchScalarRootCompression()
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public void OutputBlocksMatchScalarRootCompression(int batchSize)
     {
         if (!OutputManySve2.IsSupported) return;
         uint[] cv = MemoryMarshal.Cast<byte, uint>(HasherTests.MakeTestInput(32)).ToArray();
@@ -92,9 +94,64 @@ public class HashManySve2Tests
                 MemoryMarshal.AsBytes(state.AsSpan()).CopyTo(expected.AsSpan(b * 64));
             }
 
-            byte[] actual = new byte[1024];
-            OutputManySve2.HashOutput8(cv, block, counter, blockLen, flags, actual);
-            Assert.Equal(expected, actual);
+            byte[] actual = Enumerable.Repeat((byte)0xAD, 1026).ToArray();
+            if (batchSize == 4)
+                OutputManySve2.HashOutput4(cv, block, counter, blockLen, flags, actual.AsSpan(1, 1024));
+            else
+                OutputManySve2.HashOutput8(cv, block, counter, blockLen, flags, actual.AsSpan(1, 1024));
+            Assert.Equal(expected, actual.AsSpan(1, 1024).ToArray());
+            Assert.Equal((byte)0xAD, actual[0]);
+            Assert.Equal((byte)0xAD, actual[^1]);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(63)]
+    [InlineData(64)]
+    [InlineData(65)]
+    [InlineData(511)]
+    [InlineData(512)]
+    [InlineData(513)]
+    [InlineData(1023)]
+    public void PartialFourthChunkMatchesIndependentCompression(int partialLength)
+    {
+        if (!HashManySve2.IsSupported) return;
+        byte[] input = HasherTests.MakeTestInput(3 * 1024 + partialLength + 1);
+        uint[] key = MemoryMarshal.Cast<byte, uint>(HasherTests.MakeTestInput(32)).ToArray();
+        foreach (ulong counter in Counters)
+        foreach (uint flags in FlagSets)
+        {
+            uint[] expected = new uint[32];
+            for (int lane = 0; lane < 4; lane++)
+                CompressScalar.HashChunk(key, counter + (ulong)lane, flags, false,
+                    input.AsSpan(1 + lane * 1024, lane == 3 ? partialLength : 1024), expected.AsSpan(lane * 8, 8));
+            uint[] guarded = Enumerable.Repeat(0xDEADBEEFu, 34).ToArray();
+            HashManySve2.HashThreeWithPartial(input.AsSpan(1), key, counter, flags, guarded.AsSpan(1, 32));
+            Assert.Equal(expected, guarded.AsSpan(1, 32).ToArray());
+            Assert.Equal(0xDEADBEEFu, guarded[0]);
+            Assert.Equal(0xDEADBEEFu, guarded[^1]);
+        }
+    }
+
+    [Fact]
+    public void ThreeParentsWriteOnlyThreeChainingValues()
+    {
+        if (!HashManySve2.IsSupported) return;
+        uint[] children = MemoryMarshal.Cast<byte, uint>(HasherTests.MakeTestInput(3 * 64 + 4)).ToArray();
+        uint[] key = MemoryMarshal.Cast<byte, uint>(HasherTests.MakeTestInput(32)).ToArray();
+        foreach (uint flags in FlagSets)
+        {
+            uint[] expected = new uint[24];
+            for (int p = 0; p < 3; p++)
+                Blake3Core.CompressCv(key, children.AsSpan(1 + p * 16, 16), 0, 64,
+                    flags | Blake3Constants.Parent, expected.AsSpan(p * 8, 8));
+            uint[] guarded = Enumerable.Repeat(0xDEADBEEFu, 26).ToArray();
+            HashManySve2.HashParentsPartial(children.AsSpan(1), 3, key,
+                flags | Blake3Constants.Parent, guarded.AsSpan(1, 24));
+            Assert.Equal(expected, guarded.AsSpan(1, 24).ToArray());
+            Assert.Equal(0xDEADBEEFu, guarded[0]);
+            Assert.Equal(0xDEADBEEFu, guarded[^1]);
         }
     }
 

@@ -2,7 +2,7 @@
 
 A managed C# implementation of the [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) hash function for .NET, with no native dependencies.
 
-One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAKE3 without shipping a native library, or if you hash large inputs: its default one-shot `Hash()` spreads large inputs across the thread pool, which the other .NET packages only do through an explicit `UpdateWithJoin` call. On a single x86 thread it is in the same range as the Rust binding, sometimes ahead and sometimes behind; on ARM64 with SVE2 (AWS Graviton4) its one-shot `Hash()` beat the Rust binding at every size measured. If you hash many tiny inputs through the incremental `Hasher` API, or you need an implementation someone else has audited, use [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native) instead.
+One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAKE3 without shipping a native library, or if you hash large inputs: its default one-shot `Hash()` spreads large inputs across the thread pool, which the other .NET packages only do through an explicit `UpdateWithJoin` call. On a single x86 thread it is in the same range as the Rust binding, sometimes ahead and sometimes behind; on ARM64 with SVE2 (Arm Neoverse V2) its one-shot `Hash()` beat the Rust binding at every size measured. If you hash many tiny inputs through the incremental `Hasher` API, or you need an implementation someone else has audited, use [`Blake3.Native`](https://www.nuget.org/packages/Blake3.Native) instead.
 
 [![NuGet](https://img.shields.io/nuget/v/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Blake3.Managed.svg)](https://www.nuget.org/packages/Blake3.Managed)
@@ -12,12 +12,12 @@ One managed DLL, no P/Invoke and no per-platform assets. Use it if you want BLAK
 
 ## Features
 
-- **Hardware accelerated** - on x86, AVX-512 16-way and AVX2 8-way parallel hashing with SSE/SSSE3 below them; on ARM64, SVE2 (Armv9, e.g. AWS Graviton4) and NEON 4-way parallel hashing; automatic scalar fallback
-- **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out from ~32 KiB too on AVX2 hardware, under the same back-off
+- **Hardware accelerated** - on x86, AVX-512 16-way and AVX2 8-way parallel hashing with SSE/SSSE3 below them; on ARM64, SVE2 (Armv9, e.g. Arm Neoverse V2 or Cortex-A510) and NEON 4-way parallel hashing; automatic scalar fallback
+- **Multi-threaded** - large inputs are split into subtrees and hashed on the thread pool. One-shot `Hash()` fans out from ~32 KiB, and backs off to a single thread when many hashes are already in flight; `UpdateWithJoin`, used by `Blake3HashAlgorithm` and `Blake3Stream`, fans out from ~32 KiB too on AVX2 hardware, under the same back-off. Cortex-A510 tuning also enables ARM64 `UpdateWithJoin` fan-out with a one-caller limit
 - **Split hashing** - hash pieces independently and combine them into the whole-input digest with `Blake3SubtreeContext`
 - **Zero allocation** for small inputs with `Hasher.Hash()`
 - **All BLAKE3 modes** - default hashing, keyed hashing, and key derivation
-- **XOF support** - extendable output with a seekable byte stream, producing long output 16 blocks at a time with AVX-512, 8 with AVX2 or SVE2
+- **XOF support** - extendable output with a seekable byte stream, producing long output 16 blocks at a time with AVX-512, 8 with AVX2 or SVE2, or 4 with SVE2 when Cortex-A510 tuning is enabled
 - **Familiar API** - modeled after [Blake3.NET](https://github.com/xoofx/Blake3.NET)
 - **Targets** `net6.0`, `net8.0` and `net10.0`, with Native AOT support on `net8.0` and above
 
@@ -244,9 +244,9 @@ Native is fastest at every output length here, by 5% at 128 KiB of output and 13
 128 B; this library is ahead of CryptoHives throughout. The XOF numbers come from a separate
 run on the same machine.
 
-### ARM64 with SVE2 (AWS Graviton4)
+### ARM64 with SVE2 (Arm Neoverse V2)
 
-Measured on **2026-09-23** on an EC2 c8g.large: Graviton4 (Neoverse V2, 128-bit SVE2),
+Measured on **2026-09-23** on Arm Neoverse V2 (128-bit SVE2),
 2 cores, Ubuntu 26.04, .NET 10.0.12, BenchmarkDotNet default job. Mean times, single-threaded
 except where marked:
 
@@ -267,7 +267,65 @@ because the hasher is a roughly 2 KB struct that .NET zeroes and copies. Extende
 ahead on this machine: in a separate in-process comparison, 64 KiB of output took 0.28 of the
 Rust binding's time, because the Rust crate produces ARM output one block at a time.
 
+### Cortex-A510 tuning
+
+SVE2 instruction scheduling, three-parent batching and a specialized partial-chunk
+kernel are enabled by default. Applications running on Cortex-A510 can also select
+CPU-specific batching before the first call to this library:
+
+```csharp
+AppContext.SetSwitch("Blake3.Managed.TuneForCortexA510", true);
+```
+
+This switch is off by default and read once. Enable it only when the application runs
+on Cortex-A510 cores; it does not detect the CPU model or change thread affinity.
+It selects two four-chunk SVE2 calls for eight-chunk batches, four-block SVE2 XOF
+output, scalar handling of short NEON tails, and ARM64 `UpdateWithJoin` fan-out.
+The NEON choices also apply when SVE2 is unavailable to the runtime. Other CPU models
+retain the default batching policy, including eight-block SVE2 XOF output.
+
+With tuning enabled, ARM64 `UpdateWithJoin` can use multiple cores above 32 KiB
+when the current chunk state and available subtrees permit it. Only the first eligible
+caller may fan out; later eligible calls use the serial path until contention subsides.
+This gate does not count every ordinary ARM64 `Hash` call. As with the existing x86
+Join path, `Hasher.MaxDegreeOfParallelism` controls one-shot hashing only.
+
+The combined implementation was compared with **v1.9.0** on **2026-10-14**, using four
+Arm Cortex-A510 cores with 128-bit SVE2 and the performance governor. Selected
+.NET 10.0.12 results follow; lower times are better. Hash rows write a 32-byte digest.
+XOF rows create a hasher, absorb 64 bytes, generate output, and dispose it.
+
+| Workload | v1.9.0 | New defaults | Cortex-A510 tuning |
+|---|---:|---:|---:|
+| Hash, 4 KiB input | 14.69 us | 5.91 us | 5.99 us |
+| Hash, 8 KiB input | 30.09 us | 18.92 us | 11.05 us |
+| XOF, 128 B output (control) | 1.068 us | 1.070 us | 1.073 us |
+| XOF, 256 B output | 2.424 us | 1.838 us | 1.133 us |
+| XOF, 512 B output | 2.403 us | 1.827 us | 1.484 us |
+| XOF, 4096 B output | 13.83 us | 9.23 us | 6.51 us |
+
+These are steady-state medians of process medians: three fresh processes per build,
+five timed samples per process, one second of warmup, and reversed execution order
+between rounds. These single-threaded cases were pinned to one core. They do not
+measure startup or JIT cost. The 32-byte hash control also stayed within 1% of v1.9.0.
+
+For 8 MiB `UpdateWithJoin` calls on .NET 10, tuning raised single-caller throughput
+from 266 to 2263 MB/s by using four cores instead of the previous serial path.
+With four concurrent callers, aggregate throughput rose from 885 to 2392 MB/s.
+These compare the complete implementation with v1.9.0, including the faster kernels;
+they do not isolate the benefit of threading. MB/s is decimal.
+
+The integration passed 589 tests in each of 12 ARM configurations: .NET 10.0.12 and
+.NET 11 RC1 (`11.0.0-rc.1.26425.128`), SVE2/NEON/scalar, and tuning off/on. Each
+configuration also passed 7,492 official-vector and Rust-reference checks. Guarded
+memory tests passed for the new partial-chunk and four-block XOF kernels on both
+runtimes. The Neoverse V2 table above remains an earlier comparison with the Rust
+binding; Cortex-A510 gains should not be assumed for other CPU models.
+
 ### Reproducing the results
+
+The commands below reproduce the competitive benchmark workloads above. The
+Cortex-A510 comparisons used separate baseline and candidate builds with a paired measurement harness.
 
 ```bash
 # One-shot table: 5 implementations, 12 input sizes
@@ -294,13 +352,13 @@ The implementation automatically selects the best available instruction set at r
 | **AVX-512** (.NET 8+) | 512-bit vectors | 16-chunk batches for whole 16-chunk subtrees and 16-block XOF output; everything smaller uses the AVX2 tier with AVX-512 VL rotates |
 | **AVX2** | 256-bit vectors | 8-chunk batches, partial batches for 5–7 chunks, a 3–4 chunk kernel where AVX-512 VL is present, 2-chunk remainders, 8-way parent hashing and 8-block XOF output |
 | **SSE/SSSE3** | 128-bit vectors + shuffle | 4 chunks simultaneously, single-lane SIMD fallback |
-| **ARM SVE2** (.NET 10) | 128-bit SVE vectors with `XAR` (fused xor and rotate) | 8 chunks as two interleaved 4-lane batches, 4-chunk batches, 2- and 3-chunk remainders, 4-way parent hashing and 8-block XOF output |
+| **ARM SVE2** (.NET 10) | 128-bit SVE vectors with `XAR` (fused xor and rotate) | 8 chunks as two interleaved 4-lane batches, 4-chunk batches, 2- and 3-chunk remainders, 4-way parent hashing (plus three-parent remainders) and 8-block XOF output; Cortex-A510 tuning selects two 4-chunk calls and 4-block XOF output |
 | **ARM NEON** | 128-bit vectors | 4 chunks simultaneously, 3-chunk remainders, 4-way parent hashing |
 | **Scalar** | Pure C# | Single blocks on ARM64, and the portable fallback everywhere else |
 
 SVE2 uses the `System.Runtime.Intrinsics.Arm.Sve2` API, which .NET 10 marks experimental; the
 library only reads `Sve2.IsSupported` and `Sve2.XorRotateRight`, and on CPUs without SVE2 the
-NEON path runs unchanged. The NEON path is tested on AWS Graviton3 (Neoverse V1), which has SVE
+NEON path runs unchanged. The NEON path is tested on Arm Neoverse V1, which has SVE
 but not SVE2 and so takes it.
 
 ## Building from Source

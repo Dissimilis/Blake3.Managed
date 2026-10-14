@@ -2,6 +2,37 @@
 
 Guidance for AI coding assistants and contributors working in this repository. Machine-specific notes (benchmark hosts, credentials, remote workspaces) belong in the git-ignored `CLAUDE.local.md`, never here.
 
+## Cortex-A510 integration, 2026-10-14
+
+SVE2 four/eight-way instruction scheduling, three-parent batching, the three-full-plus-partial
+chunk kernel and scheduled eight-block XOF now form the default implementation. The retained
+CPU-specific alternatives are selected through the cached AppContext switch
+`Blake3.Managed.TuneForCortexA510`, set before the library is first used. It defaults to false.
+
+The switch selects two four-way SVE2 hash calls, four-block SVE2 XOF, scalar handling of short
+NEON tails, and the ARM Join worker with a one-entrant fan-out gate above 32 KiB. This is an
+explicit deployment choice for Cortex-A510 cores, not automatic CPU detection. It avoids
+shipping the experimental CPU classifier, whose overhead and topology invalidation were not
+validated. The NEON tail choices do not replace the existing Cortex-A73 policy by default.
+
+ARM Join keeps the final chunk in the incremental state, reduces aligned 16/64-chunk subtrees,
+and folds tail batches in order. Every eligible Join call holds the shared counter until its
+parallel or serial work completes. Other ARM one-shot traffic is not all counted by this gate.
+`Hasher.MaxDegreeOfParallelism` still applies only to one-shot hashing.
+
+The integrated net10.0 library passed 589 tests and the 7,492-check official/Rust reference gate
+in each of 12 Cortex-A510 configurations: .NET 10.0.12 and 11.0.0-rc.1.26425.128, SVE2/NEON/scalar,
+and tuning off/on. Another 67,584 guarded-memory comparisons covered partial chunks and
+four-block XOF on both runtimes. Windows native/AVX2/SSE/scalar tests and reference gates passed;
+the library builds for net6.0, net8.0 and net10.0. Tests can enable the switch with
+`dotnet test src/Blake3.Managed.Tests -c Release -p:TuneForCortexA510=true`.
+
+The README records fresh combined-build comparisons against v1.9.0, separately from the earlier
+Neoverse V2 competitive results. Do not add the earlier individual experiment gains together,
+or infer a Neoverse V2 speedup from Cortex-A510 measurements. Rejected scheduling, tail-local
+and parent-round variants remain excluded. Benchmark helpers and raw evidence stay outside
+this repository.
+
 ## Project Overview
 
 `Blake3.Managed` is a pure managed C# implementation of the BLAKE3 cryptographic hash function using hardware intrinsics. The project structure:

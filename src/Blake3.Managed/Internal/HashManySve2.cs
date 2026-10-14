@@ -14,8 +14,7 @@ namespace Blake3.Managed.Internal;
 /// The <see cref="HashManyNeon"/> kernels with every xor-then-rotate fused into one SVE2
 /// <c>XAR</c>, plus an 8-chunk kernel. A NEON G step costs 18 vector ops (6 adds, 4 xors, 8 for
 /// the rotates: REV32, TBL and two shift-shift-or triples); with XAR it costs 10. The 4-chunk
-/// bodies are copied statement for statement from <see cref="HashManyNeon"/>; only
-/// <see cref="G128"/> differs.
+/// bodies step through independent G operations together to expose instruction parallelism.
 /// <para>
 /// Measured on Graviton4 (Neoverse-V2, 128-bit SVE, .NET 10.0.12, 2026-09-23): the 4-way kernel
 /// ran in 0.675 of the NEON time with 31% fewer instructions. Fusing only the 12- and 7-bit
@@ -25,8 +24,7 @@ namespace Blake3.Managed.Internal;
 /// The 4-chunk kernels are reached through the <see cref="HashManyNeon"/> entry points, which
 /// forward here; <see cref="HashMany8"/> is called directly from <see cref="Blake3Tree"/> and
 /// <c>Blake3Core.HasherState</c>. Every call site is guarded by <see cref="IsSupported"/>, a
-/// JIT-time constant, and was placed so that the NEON and x86 code compiles byte for byte as
-/// before (checked by disassembly on Cortex-A73 and four x86 tiers; see CLAUDE.md).
+/// JIT-time constant. CPU-specific batching is selected separately by <see cref="ArmTuning"/>.
 /// </para>
 /// </summary>
 internal static class HashManySve2
@@ -156,68 +154,124 @@ internal static class HashManySve2
                 Vector128<uint> s14 = blockLenVec, s15 = flagsVec;
 
                 // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-                G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[8]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-                G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[7]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-                G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[11]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[5]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-                G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-                G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[12]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[10]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-                G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[6]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-                G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[15]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
 
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = AdvSimd.Xor(s0, s8);
@@ -261,7 +315,7 @@ internal static class HashManySve2
 
         // Unused lanes reread chunk zero, keeping partial batches inside the input span.
         // All four CVs are computed; only numChunks of them are written out.
-        int offset1 = numChunks > 1 ? 1 * Blake3Constants.ChunkLen : 0;
+        int offset1 = numChunks > 1 ? Blake3Constants.ChunkLen : 0;
         int offset2 = numChunks > 2 ? 2 * Blake3Constants.ChunkLen : 0;
         int offset3 = numChunks > 3 ? 3 * Blake3Constants.ChunkLen : 0;
 
@@ -334,68 +388,124 @@ internal static class HashManySve2
                 Vector128<uint> s14 = blockLenVec, s15 = flagsVec;
 
                 // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-                G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[8]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-                G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[7]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-                G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[11]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[5]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-                G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-                G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[12]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[10]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-                G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[6]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-                G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-                G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-                G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-                G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-                G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-                G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-                G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-                G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[15]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
 
                 // Post-XOR: only chaining value (first 8 words)
                 cv0 = AdvSimd.Xor(s0, s8);
@@ -475,68 +585,124 @@ internal static class HashManySve2
             Vector128<uint> s15 = Vector128.Create(flags | Blake3Constants.Parent);
 
             // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-            G128(ref s0, ref s4, ref s8,  ref s12, m[0],  m[1]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[2],  m[3]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[4],  m[5]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[6],  m[7]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[8],  m[9]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[10], m[11]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[12], m[13]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[14], m[15]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[8]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
-            G128(ref s0, ref s4, ref s8,  ref s12, m[2],  m[6]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[3],  m[10]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[7],  m[0]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[4],  m[13]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[1],  m[11]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[12], m[5]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[9],  m[14]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[15], m[8]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[7]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
-            G128(ref s0, ref s4, ref s8,  ref s12, m[3],  m[4]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[10], m[12]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[13], m[2]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[7],  m[14]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[6],  m[5]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[9],  m[0]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[11], m[15]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[8],  m[1]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[11]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[5]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
-            G128(ref s0, ref s4, ref s8,  ref s12, m[10], m[7]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[12], m[9]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[14], m[3]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[13], m[15]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[4],  m[0]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[11], m[2]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[5],  m[8]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[1],  m[6]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
-            G128(ref s0, ref s4, ref s8,  ref s12, m[12], m[13]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[9],  m[11]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[15], m[10]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[14], m[8]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[7],  m[2]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[5],  m[3]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[0],  m[1]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[6],  m[4]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[12]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[10]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
-            G128(ref s0, ref s4, ref s8,  ref s12, m[9],  m[14]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[11], m[5]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[8],  m[12]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[15], m[1]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[13], m[3]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[0],  m[10]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[2],  m[6]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[4],  m[7]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[6]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
             // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
-            G128(ref s0, ref s4, ref s8,  ref s12, m[11], m[15]);
-            G128(ref s1, ref s5, ref s9,  ref s13, m[5],  m[0]);
-            G128(ref s2, ref s6, ref s10, ref s14, m[1],  m[9]);
-            G128(ref s3, ref s7, ref s11, ref s15, m[8],  m[6]);
-            G128(ref s0, ref s5, ref s10, ref s15, m[14], m[10]);
-            G128(ref s1, ref s6, ref s11, ref s12, m[2],  m[12]);
-            G128(ref s2, ref s7, ref s8,  ref s13, m[3],  m[4]);
-            G128(ref s3, ref s4, ref s9,  ref s14, m[7],  m[13]);
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[15]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+            s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+            s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+            s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+            s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s4);
+            s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+            s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+            s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
 
             var cv0 = AdvSimd.Xor(s0, s8);
             var cv1 = AdvSimd.Xor(s1, s9);
@@ -563,8 +729,9 @@ internal static class HashManySve2
     }
 
     /// <summary>
-    /// Eight complete chunks as two independent 4-chunk batches (A: chunks 0-3, B: 4-7) whose
-    /// rounds are interleaved per half-round. One batch is a latency-bound chain -- each G is a
+    /// Eight complete chunks. Cortex-A510 tuning uses two four-way calls; otherwise the
+    /// kernel uses two independent 4-chunk batches (A: chunks 0-3, B: 4-7) whose
+    /// operations are interleaved. One batch is a latency-bound chain -- each G is a
     /// serial run of adds and XARs, and four of them only half-fill V2's vector pipes -- so a
     /// second, independent batch runs in the gaps.
     /// <para>
@@ -577,7 +744,21 @@ internal static class HashManySve2
     /// </summary>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
-    public static unsafe void HashMany8(ReadOnlySpan<byte> chunks, ReadOnlySpan<uint> key,
+    public static void HashMany8(ReadOnlySpan<byte> chunks, ReadOnlySpan<uint> key,
+                                 ulong startCounter, uint flags, Span<uint> cvs)
+    {
+        if (ArmTuning.CortexA510)
+        {
+            HashMany(chunks.Slice(0, 4096), 4, key, startCounter, flags, cvs.Slice(0, 32));
+            HashMany(chunks.Slice(4096, 4096), 4, key, startCounter + 4, flags, cvs.Slice(32, 32));
+            return;
+        }
+        HashMany8Interleaved(chunks, key, startCounter, flags, cvs);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static unsafe void HashMany8Interleaved(ReadOnlySpan<byte> chunks, ReadOnlySpan<uint> key,
                                         ulong startCounter, uint flags, Span<uint> cvs)
     {
         const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
@@ -643,263 +824,263 @@ internal static class HashManySve2
 
                 // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[0]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[1]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[4]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[5]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[0]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[4]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[1]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[5]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[0]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[1]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[4]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[5]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[0]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[4]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[1]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[5]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[8]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[9]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[12]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[13]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[8]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[12]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[9]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[13]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[8]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[9]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[12]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[13]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[8]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[12]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[9]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[13]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[2]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[6]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[7]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[0]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[2]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[7]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[6]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[0]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[2]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[6]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[7]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[0]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[2]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[7]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[6]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[0]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[1]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[11]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[9]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[14]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[1]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[9]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[11]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[14]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[1]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[11]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[9]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[14]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[1]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[9]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[11]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[14]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[3]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[4]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[13]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[2]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[3]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[13]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[4]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[2]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[3]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[4]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[13]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[2]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[3]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[13]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[4]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[2]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[6]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[5]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[11]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[15]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[6]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[11]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[5]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[15]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[6]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[5]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[11]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[15]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[6]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[11]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[5]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[15]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[10]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[7]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[14]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[3]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[10]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[14]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[7]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[3]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[10]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[7]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[14]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[3]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[10]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[14]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[7]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[3]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[4]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[0]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[5]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[8]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[4]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[5]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[0]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[8]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[4]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[0]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[5]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[8]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[4]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[5]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[0]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[8]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[12]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[13]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[15]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[10]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[12]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[9]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[15]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[14]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[13]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[10]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[12]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[13]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[15]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[10]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[12]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[9]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[15]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[14]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[13]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[10]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[7]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[2]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[0]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[1]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[7]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[0]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[2]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[3]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[1]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[7]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[2]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[0]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[1]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[7]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[0]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[2]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[3]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[1]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[9]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[14]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[8]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[12]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[9]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[11]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[8]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[15]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[14]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[12]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[1]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[9]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[14]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[8]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[12]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[9]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[11]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[8]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[15]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[14]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[12]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[1]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[13]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[3]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[2]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[6]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[13]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[2]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[4]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[3]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[10]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[6]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[13]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[3]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[2]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[6]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[13]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[2]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[4]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[3]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[10]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[6]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
                 // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
                 // columns, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[11]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[15]), a4); a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a12); a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a5); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a13); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[1]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[9]), a6); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a14); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a7); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a15); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[11]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[5]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[1]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[8]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 16).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 16).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 12).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[15]), a4); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[0]), a5); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[9]), a6); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[6]), a7);
+                a12 = Sve2.XorRotateRight(a12.AsVector(), a0.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a1.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a2.AsVector(), 8).AsVector128(); a15 = Sve2.XorRotateRight(a15.AsVector(), a3.AsVector(), 8).AsVector128();
+                a8 = AdvSimd.Add(a8, a12); a9 = AdvSimd.Add(a9, a13); a10 = AdvSimd.Add(a10, a14); a11 = AdvSimd.Add(a11, a15);
+                a4 = Sve2.XorRotateRight(a4.AsVector(), a8.AsVector(), 7).AsVector128(); a5 = Sve2.XorRotateRight(a5.AsVector(), a9.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a10.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a11.AsVector(), 7).AsVector128();
                 // columns, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[11]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[15]), b4); b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b12); b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b5); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b13); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[1]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[9]), b6); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b14); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b7); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b15); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[11]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[5]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[1]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[8]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 16).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 16).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 12).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[15]), b4); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[0]), b5); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[9]), b6); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[6]), b7);
+                b12 = Sve2.XorRotateRight(b12.AsVector(), b0.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b1.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b2.AsVector(), 8).AsVector128(); b15 = Sve2.XorRotateRight(b15.AsVector(), b3.AsVector(), 8).AsVector128();
+                b8 = AdvSimd.Add(b8, b12); b9 = AdvSimd.Add(b9, b13); b10 = AdvSimd.Add(b10, b14); b11 = AdvSimd.Add(b11, b15);
+                b4 = Sve2.XorRotateRight(b4.AsVector(), b8.AsVector(), 7).AsVector128(); b5 = Sve2.XorRotateRight(b5.AsVector(), b9.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b10.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b11.AsVector(), 7).AsVector128();
                 // diagonals, batch A
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[14]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128();
-                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[10]), a5); a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a10 = AdvSimd.Add(a10, a15); a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128();
-                a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a6); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a11 = AdvSimd.Add(a11, a12); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[3]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128();
-                a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[4]), a7); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a8 = AdvSimd.Add(a8, a13); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
-                a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a4); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128(); a9 = AdvSimd.Add(a9, a14); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[14]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[2]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[3]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[7]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 16).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 16).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 16).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 16).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 12).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 12).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 12).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 12).AsVector128();
+                a0 = AdvSimd.Add(AdvSimd.Add(a0, mA[10]), a5); a1 = AdvSimd.Add(AdvSimd.Add(a1, mA[12]), a6); a2 = AdvSimd.Add(AdvSimd.Add(a2, mA[4]), a7); a3 = AdvSimd.Add(AdvSimd.Add(a3, mA[13]), a4);
+                a15 = Sve2.XorRotateRight(a15.AsVector(), a0.AsVector(), 8).AsVector128(); a12 = Sve2.XorRotateRight(a12.AsVector(), a1.AsVector(), 8).AsVector128(); a13 = Sve2.XorRotateRight(a13.AsVector(), a2.AsVector(), 8).AsVector128(); a14 = Sve2.XorRotateRight(a14.AsVector(), a3.AsVector(), 8).AsVector128();
+                a10 = AdvSimd.Add(a10, a15); a11 = AdvSimd.Add(a11, a12); a8 = AdvSimd.Add(a8, a13); a9 = AdvSimd.Add(a9, a14);
+                a5 = Sve2.XorRotateRight(a5.AsVector(), a10.AsVector(), 7).AsVector128(); a6 = Sve2.XorRotateRight(a6.AsVector(), a11.AsVector(), 7).AsVector128(); a7 = Sve2.XorRotateRight(a7.AsVector(), a8.AsVector(), 7).AsVector128(); a4 = Sve2.XorRotateRight(a4.AsVector(), a9.AsVector(), 7).AsVector128();
                 // diagonals, batch B
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[14]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128();
-                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[10]), b5); b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b10 = AdvSimd.Add(b10, b15); b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128();
-                b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b6); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b11 = AdvSimd.Add(b11, b12); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[3]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128();
-                b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[4]), b7); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b8 = AdvSimd.Add(b8, b13); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
-                b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b4); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128(); b9 = AdvSimd.Add(b9, b14); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[14]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[2]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[3]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[7]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 16).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 16).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 16).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 16).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 12).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 12).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 12).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 12).AsVector128();
+                b0 = AdvSimd.Add(AdvSimd.Add(b0, mB[10]), b5); b1 = AdvSimd.Add(AdvSimd.Add(b1, mB[12]), b6); b2 = AdvSimd.Add(AdvSimd.Add(b2, mB[4]), b7); b3 = AdvSimd.Add(AdvSimd.Add(b3, mB[13]), b4);
+                b15 = Sve2.XorRotateRight(b15.AsVector(), b0.AsVector(), 8).AsVector128(); b12 = Sve2.XorRotateRight(b12.AsVector(), b1.AsVector(), 8).AsVector128(); b13 = Sve2.XorRotateRight(b13.AsVector(), b2.AsVector(), 8).AsVector128(); b14 = Sve2.XorRotateRight(b14.AsVector(), b3.AsVector(), 8).AsVector128();
+                b10 = AdvSimd.Add(b10, b15); b11 = AdvSimd.Add(b11, b12); b8 = AdvSimd.Add(b8, b13); b9 = AdvSimd.Add(b9, b14);
+                b5 = Sve2.XorRotateRight(b5.AsVector(), b10.AsVector(), 7).AsVector128(); b6 = Sve2.XorRotateRight(b6.AsVector(), b11.AsVector(), 7).AsVector128(); b7 = Sve2.XorRotateRight(b7.AsVector(), b8.AsVector(), 7).AsVector128(); b4 = Sve2.XorRotateRight(b4.AsVector(), b9.AsVector(), 7).AsVector128();
 
                 ca0 = AdvSimd.Xor(a0, a8); ca1 = AdvSimd.Xor(a1, a9); ca2 = AdvSimd.Xor(a2, a10); ca3 = AdvSimd.Xor(a3, a11);
                 ca4 = AdvSimd.Xor(a4, a12); ca5 = AdvSimd.Xor(a5, a13); ca6 = AdvSimd.Xor(a6, a14); ca7 = AdvSimd.Xor(a7, a15);
@@ -922,5 +1103,296 @@ internal static class HashManySve2
         VectorCompat.Store(o2, ref outRef, 48);  VectorCompat.Store(o6, ref outRef, 52);  // chunk 6
         VectorCompat.Store(o3, ref outRef, 56);  VectorCompat.Store(o7, ref outRef, 60);  // chunk 7
     }
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void HashThreeWithPartial(ReadOnlySpan<byte> chunks,
+                                       ReadOnlySpan<uint> key, ulong startCounter,
+                                       uint flags, Span<uint> cvs)
+    {
+        const int fullChunks = 3;
+        int partialLen = chunks.Length - fullChunks * Blake3Constants.ChunkLen;
+        if (partialLen <= 0 || partialLen >= Blake3Constants.ChunkLen) throw new ArgumentException("Need a partial final chunk.", nameof(chunks));
+        int numChunks = fullChunks;
+        int lastBlock = (partialLen - 1) >> 6;
+        int lastLen = partialLen - (lastBlock << 6);
+
+        Vector128<uint>* padded = stackalloc Vector128<uint>[4];
+        padded[0] = default; padded[1] = default; padded[2] = default; padded[3] = default;
+        chunks.Slice(fullChunks * Blake3Constants.ChunkLen + (lastBlock << 6), lastLen)
+            .CopyTo(new Span<byte>(padded, Blake3Constants.BlockLen));
+        Vector128<uint>* latched = stackalloc Vector128<uint>[8];
+        var laneMask = AdvSimd.CompareEqual(Vector128.Create(0u, 1u, 2u, 3u), Vector128.Create((uint)fullChunks));
+
+        const int blocksPerChunk = Blake3Constants.ChunkLen / Blake3Constants.BlockLen; // 16
+
+        // The fourth lane reads the partial chunk separately and latches its final CV.
+        const int offset1 = Blake3Constants.ChunkLen;
+        const int offset2 = 2 * Blake3Constants.ChunkLen;
+        const int offset3 = 0;
+
+        Vector128<uint> cv0 = Vector128.Create(key[0]);
+        Vector128<uint> cv1 = Vector128.Create(key[1]);
+        Vector128<uint> cv2 = Vector128.Create(key[2]);
+        Vector128<uint> cv3 = Vector128.Create(key[3]);
+        Vector128<uint> cv4 = Vector128.Create(key[4]);
+        Vector128<uint> cv5 = Vector128.Create(key[5]);
+        Vector128<uint> cv6 = Vector128.Create(key[6]);
+        Vector128<uint> cv7 = Vector128.Create(key[7]);
+
+        var counterLo = Vector128.Create(
+            (uint)(startCounter + 0), (uint)(startCounter + 1),
+            (uint)(startCounter + 2), (uint)(startCounter + 3));
+        var counterHi = Vector128.Create(
+            (uint)((startCounter + 0) >> 32), (uint)((startCounter + 1) >> 32),
+            (uint)((startCounter + 2) >> 32), (uint)((startCounter + 3) >> 32));
+
+        var ivVec0 = Vector128.Create(Blake3Constants.Iv0);
+        var ivVec1 = Vector128.Create(Blake3Constants.Iv1);
+        var ivVec2 = Vector128.Create(Blake3Constants.Iv2);
+        var ivVec3 = Vector128.Create(Blake3Constants.Iv3);
+        var blockLenVec = Vector128.Create((uint)Blake3Constants.BlockLen);
+
+        fixed (byte* chunksPtr = chunks)
+        {
+            Vector128<uint>* m = stackalloc Vector128<uint>[16];
+
+            for (int blockIdx = 0; blockIdx < blocksPerChunk; blockIdx++)
+            {
+                byte* blockBase = chunksPtr + blockIdx * 64;
+                byte* partialBlock = blockIdx < lastBlock
+                    ? chunksPtr + fullChunks * Blake3Constants.ChunkLen + blockIdx * 64
+                    : (byte*)padded;
+                uint partLen = blockIdx < lastBlock ? 64u : (uint)lastLen;
+                uint partFlags = flags | (blockIdx == 0 ? Blake3Constants.ChunkStart : 0u)
+                                       | (blockIdx < lastBlock ? 0u : Blake3Constants.ChunkEnd);
+
+                // Load 4 words (16 bytes) from each of 4 chunks, then transpose
+                // Lower 8 words (0-7): two groups of 4
+                var r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen);
+                var r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1));
+                var r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2));
+                var r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3));
+                Transpose4X4(r0, r1, r2, r3, out m[0], out m[1], out m[2], out m[3]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 16);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 16);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 16);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 16);
+                Transpose4X4(r0, r1, r2, r3, out m[4], out m[5], out m[6], out m[7]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 32);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 32);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 32);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 32);
+                Transpose4X4(r0, r1, r2, r3, out m[8], out m[9], out m[10], out m[11]);
+
+                r0 = Unsafe.ReadUnaligned<Vector128<uint>>(blockBase + 0 * Blake3Constants.ChunkLen + 48);
+                r1 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 1 ? partialBlock : blockBase + offset1) + 48);
+                r2 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 2 ? partialBlock : blockBase + offset2) + 48);
+                r3 = Unsafe.ReadUnaligned<Vector128<uint>>((fullChunks == 3 ? partialBlock : blockBase + offset3) + 48);
+                Transpose4X4(r0, r1, r2, r3, out m[12], out m[13], out m[14], out m[15]);
+
+                // Block flags
+                uint blockFlags = flags;
+                if (blockIdx == 0) blockFlags |= Blake3Constants.ChunkStart;
+                if (blockIdx == blocksPerChunk - 1) blockFlags |= Blake3Constants.ChunkEnd;
+                var flagsVec = Vector128.Create(blockFlags);
+
+                Vector128<uint> s0 = cv0, s1 = cv1, s2 = cv2, s3 = cv3;
+                Vector128<uint> s4 = cv4, s5 = cv5, s6 = cv6, s7 = cv7;
+                Vector128<uint> s8 = ivVec0, s9 = ivVec1, s10 = ivVec2, s11 = ivVec3;
+                Vector128<uint> s12 = counterLo, s13 = counterHi;
+                Vector128<uint> s14 = AdvSimd.BitwiseSelect(laneMask, Vector128.Create(partLen), blockLenVec);
+                Vector128<uint> s15 = AdvSimd.BitwiseSelect(laneMask, Vector128.Create(partFlags), flagsVec);
+
+                // Round 0: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[8]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 1: 2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[7]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[1]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 2: 3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[13]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[6]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[11]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[5]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 3: 10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[14]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[4]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[5]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[0]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 4: 12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[12]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[9]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[15]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[14]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[10]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[7]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[0]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[2]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[3]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 5: 9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[9]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[11]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[8]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[15]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[12]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[1]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[13]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[2]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[4]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[3]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[10]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[6]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+                // Round 6: 11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[11]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[5]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[1]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[8]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 16).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 16).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 12).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[15]), s4); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[0]), s5); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[9]), s6); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[6]), s7);
+                s12 = Sve2.XorRotateRight(s12.AsVector(), s0.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s1.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s2.AsVector(), 8).AsVector128(); s15 = Sve2.XorRotateRight(s15.AsVector(), s3.AsVector(), 8).AsVector128();
+                s8 = AdvSimd.Add(s8, s12); s9 = AdvSimd.Add(s9, s13); s10 = AdvSimd.Add(s10, s14); s11 = AdvSimd.Add(s11, s15);
+                s4 = Sve2.XorRotateRight(s4.AsVector(), s8.AsVector(), 7).AsVector128(); s5 = Sve2.XorRotateRight(s5.AsVector(), s9.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s10.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s11.AsVector(), 7).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[14]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[2]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[3]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[7]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 16).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 16).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 16).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 16).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 12).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 12).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 12).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 12).AsVector128();
+                s0 = AdvSimd.Add(AdvSimd.Add(s0, m[10]), s5); s1 = AdvSimd.Add(AdvSimd.Add(s1, m[12]), s6); s2 = AdvSimd.Add(AdvSimd.Add(s2, m[4]), s7); s3 = AdvSimd.Add(AdvSimd.Add(s3, m[13]), s4);
+                s15 = Sve2.XorRotateRight(s15.AsVector(), s0.AsVector(), 8).AsVector128(); s12 = Sve2.XorRotateRight(s12.AsVector(), s1.AsVector(), 8).AsVector128(); s13 = Sve2.XorRotateRight(s13.AsVector(), s2.AsVector(), 8).AsVector128(); s14 = Sve2.XorRotateRight(s14.AsVector(), s3.AsVector(), 8).AsVector128();
+                s10 = AdvSimd.Add(s10, s15); s11 = AdvSimd.Add(s11, s12); s8 = AdvSimd.Add(s8, s13); s9 = AdvSimd.Add(s9, s14);
+                s5 = Sve2.XorRotateRight(s5.AsVector(), s10.AsVector(), 7).AsVector128(); s6 = Sve2.XorRotateRight(s6.AsVector(), s11.AsVector(), 7).AsVector128(); s7 = Sve2.XorRotateRight(s7.AsVector(), s8.AsVector(), 7).AsVector128(); s4 = Sve2.XorRotateRight(s4.AsVector(), s9.AsVector(), 7).AsVector128();
+
+                // Post-XOR: only chaining value (first 8 words)
+                cv0 = AdvSimd.Xor(s0, s8);
+                cv1 = AdvSimd.Xor(s1, s9);
+                cv2 = AdvSimd.Xor(s2, s10);
+                cv3 = AdvSimd.Xor(s3, s11);
+                cv4 = AdvSimd.Xor(s4, s12);
+                cv5 = AdvSimd.Xor(s5, s13);
+                cv6 = AdvSimd.Xor(s6, s14);
+                cv7 = AdvSimd.Xor(s7, s15);
+
+                if (blockIdx == lastBlock)
+                {
+                    latched[0] = cv0; latched[1] = cv1; latched[2] = cv2; latched[3] = cv3;
+                    latched[4] = cv4; latched[5] = cv5; latched[6] = cv6; latched[7] = cv7;
+                }
+
+            }
+        }
+
+        cv0 = AdvSimd.BitwiseSelect(laneMask, latched[0], cv0);
+        cv1 = AdvSimd.BitwiseSelect(laneMask, latched[1], cv1);
+        cv2 = AdvSimd.BitwiseSelect(laneMask, latched[2], cv2);
+        cv3 = AdvSimd.BitwiseSelect(laneMask, latched[3], cv3);
+        cv4 = AdvSimd.BitwiseSelect(laneMask, latched[4], cv4);
+        cv5 = AdvSimd.BitwiseSelect(laneMask, latched[5], cv5);
+        cv6 = AdvSimd.BitwiseSelect(laneMask, latched[6], cv6);
+        cv7 = AdvSimd.BitwiseSelect(laneMask, latched[7], cv7);
+        numChunks = fullChunks + 1;
+
+        // 4x4 transpose: word-major to chunk-major for output
+        Transpose4X4(cv0, cv1, cv2, cv3, out var o0, out var o1, out var o2, out var o3);
+        Transpose4X4(cv4, cv5, cv6, cv7, out var o4, out var o5, out var o6, out var o7);
+
+        ref uint outRef = ref MemoryMarshal.GetReference(cvs);
+        VectorCompat.Store(o0, ref outRef);
+        VectorCompat.Store(o4, ref outRef, 4);
+        if (numChunks > 1)
+        {
+            VectorCompat.Store(o1, ref outRef, 8);
+            VectorCompat.Store(o5, ref outRef, 12);
+        }
+        if (numChunks > 2)
+        {
+            VectorCompat.Store(o2, ref outRef, 16);
+            VectorCompat.Store(o6, ref outRef, 20);
+        }
+        if (numChunks > 3)
+        {
+            VectorCompat.Store(o3, ref outRef, 24);
+            VectorCompat.Store(o7, ref outRef, 28);
+        }
+    }
+
+    /// <summary>Bounded staging for two or three independent non-root parents.</summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static void HashParentsPartial(ReadOnlySpan<uint> children, int count,
+        ReadOnlySpan<uint> key, uint flags, Span<uint> cvs)
+    {
+        Span<uint> staged = stackalloc uint[64];
+        Span<uint> result = stackalloc uint[32];
+        children.Slice(0, count * 16).CopyTo(staged);
+        for (int i = count; i < 4; i++)
+            children.Slice(0, 16).CopyTo(staged.Slice(i * 16, 16));
+        HashParents4(staged, key, flags, result);
+        result.Slice(0, count * 8).CopyTo(cvs);
+    }
+
+
 }
 #endif

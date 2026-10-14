@@ -931,10 +931,23 @@ internal static class Blake3Tree
             n += 4;
         }
 
+#if NET10_0_OR_GREATER
+#pragma warning disable SYSLIB5003
+        if (System.Runtime.Intrinsics.Arm.Sve2.IsSupported
+            && remaining.Length >= 3 * chunkLen + 512 && remaining.Length < 4 * chunkLen)
+#pragma warning restore SYSLIB5003
+        {
+            HashManySve2.HashThreeWithPartial(remaining, key, counter, flags, cvs.Slice(n * 8, 32));
+            remaining = default;
+            counter += 4;
+            n += 4;
+        }
+#endif
+
         // Two or three whole chunks and a partial one on ARM (not SVE2): the partial chunk takes
         // a lane of the 4-way NEON kernel instead of running on the scalar path afterwards. With
         // two whole chunks a lane is wasted, so the partial chunk must be long enough to pay.
-        if (HashManyNeon.IsSupportedWithoutSve2 && remaining.Length < chunkLen * 4
+        if (HashManyNeon.IsSupportedWithoutSve2 && !ArmTuning.UseScalarNeonTails && remaining.Length < chunkLen * 4
             && remaining.Length % chunkLen != 0
             && remaining.Length > chunkLen * 2 + 6 * Blake3Constants.BlockLen)
         {
@@ -950,7 +963,7 @@ internal static class Blake3Tree
         // chunk zero. Three is the only remainder worth padding, because the kernel always pays
         // for four lanes: with the 2026-09-25 kernel three chunks take 0.78 of the scalar time on
         // Cortex-A73 and 0.67 on Neoverse-V1, while two would still lose on the A73 (~1.18x).
-        if (HashManyNeon.IsSupported && remaining.Length >= chunkLen * 3)
+        if (HashManyNeon.IsSupported && !ArmTuning.UseScalarNeonTails && remaining.Length >= chunkLen * 3)
         {
             HashManyNeon.HashManyPartial(remaining, 3, key, counter, flags,
                 cvs.Slice(n * 8, 24));
@@ -1090,6 +1103,17 @@ internal static class Blake3Tree
                 HashManyNeon.HashParents4(children.Slice(p * 16, 64), key, parentFlags,
                     outCvs.Slice(p * 8, 32));
             }
+
+#if NET10_0_OR_GREATER
+#pragma warning disable SYSLIB5003
+            if (System.Runtime.Intrinsics.Arm.Sve2.IsSupported && numParents - p == 3)
+#pragma warning restore SYSLIB5003
+            {
+                HashManySve2.HashParentsPartial(children.Slice(p * 16, 3 * 16),
+                    3, key, parentFlags, outCvs.Slice(p * 8, 3 * 8));
+                p = numParents;
+            }
+#endif
         }
 
         for (; p < numParents; p++)
