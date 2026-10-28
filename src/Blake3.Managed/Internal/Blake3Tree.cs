@@ -1116,6 +1116,13 @@ internal static class Blake3Tree
 #endif
         }
 
+        if (HashTwoAvx2.IsSupported && numParents - p == 2)
+        {
+            HashTwoAvx2.HashParents2(children.Slice(p * 16, 32), key, parentFlags,
+                outCvs.Slice(p * 8, 16));
+            p = numParents;
+        }
+
         for (; p < numParents; p++)
         {
             Blake3Core.CompressCv(key, children.Slice(p * 16, 16), 0, Blake3Constants.BlockLen,

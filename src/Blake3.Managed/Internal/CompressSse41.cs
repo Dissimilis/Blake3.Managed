@@ -348,6 +348,46 @@ internal static class CompressSse41
         return pos;
     }
 
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    public static int HashChunkPrefix(ReadOnlySpan<byte> input, Span<uint> cv,
+        ulong chunkCounter, uint flags, int blocksCompressed)
+    {
+        var ivRow = Vector128.Create(Blake3Constants.Iv0, Blake3Constants.Iv1,
+            Blake3Constants.Iv2, Blake3Constants.Iv3);
+        ref uint cvRef = ref MemoryMarshal.GetReference(cv);
+        var cv0 = VectorCompat.Load(ref cvRef);
+        var cv1 = VectorCompat.Load(ref cvRef, 4);
+        uint counterLo = (uint)chunkCounter;
+        uint counterHi = (uint)(chunkCounter >> 32);
+        ref byte src = ref MemoryMarshal.GetReference(input);
+        int pos = 0;
+        uint startFlag = flags | (blocksCompressed == 0 ? Blake3Constants.ChunkStart : 0u);
+
+        while (input.Length - pos > Blake3Constants.BlockLen)
+        {
+            var row0 = cv0;
+            var row1 = cv1;
+            var row2 = ivRow;
+            var row3 = Vector128.Create(counterLo, counterHi,
+                (uint)Blake3Constants.BlockLen, startFlag);
+            ref byte b = ref Unsafe.Add(ref src, pos);
+            DoRoundsShuffle(ref row0, ref row1, ref row2, ref row3,
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref b),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 16)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 32)),
+                Unsafe.ReadUnaligned<Vector128<uint>>(ref Unsafe.Add(ref b, 48)));
+            cv0 = Sse2.Xor(row0, row2);
+            cv1 = Sse2.Xor(row1, row3);
+            pos += Blake3Constants.BlockLen;
+            startFlag = flags;
+        }
+
+        VectorCompat.Store(cv0, ref cvRef);
+        VectorCompat.Store(cv1, ref cvRef, 4);
+        return pos;
+    }
+
     /// <summary>
     /// Root hash of a whole 0..1024-byte chunk under any key and domain flags, producing the
     /// 32-byte digest: <see cref="HashChunkRoot32Iv"/> without the IV and zero-flag constants.

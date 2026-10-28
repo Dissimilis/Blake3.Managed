@@ -447,16 +447,26 @@ internal static class Blake3Core
             // 1 KiB Update otherwise memcpys the whole kilobyte 64 bytes at a time.
             if (_blockLen == 0)
             {
-                while (remaining.Length > Blake3Constants.BlockLen)
+                if (CompressSse41.IsSupported && remaining.Length > Blake3Constants.BlockLen)
                 {
-                    ReadOnlySpan<uint> directWords =
-                        MemoryMarshal.Cast<byte, uint>(remaining.Slice(0, Blake3Constants.BlockLen));
+                    int consumed = CompressSse41.HashChunkPrefix(remaining, CvSpan,
+                        ChunkCounter, _flags, _blocksCompressed);
+                    _blocksCompressed += (byte)(consumed / Blake3Constants.BlockLen);
+                    remaining = remaining.Slice(consumed);
+                }
+                else
+                {
+                    while (remaining.Length > Blake3Constants.BlockLen)
+                    {
+                        ReadOnlySpan<uint> directWords =
+                            MemoryMarshal.Cast<byte, uint>(remaining.Slice(0, Blake3Constants.BlockLen));
 
-                    CompressCv(CvSpan, directWords, ChunkCounter,
-                        Blake3Constants.BlockLen, _flags | StartFlag, CvSpan);
+                        CompressCv(CvSpan, directWords, ChunkCounter,
+                            Blake3Constants.BlockLen, _flags | StartFlag, CvSpan);
 
-                    _blocksCompressed++;
-                    remaining = remaining.Slice(Blake3Constants.BlockLen);
+                        _blocksCompressed++;
+                        remaining = remaining.Slice(Blake3Constants.BlockLen);
+                    }
                 }
             }
 
