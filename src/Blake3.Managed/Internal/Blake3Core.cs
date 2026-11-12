@@ -1874,6 +1874,25 @@ internal static class Blake3Core
 
             int subtrees = usableChunks / subtreeChunks;
             int tailBatches = (usableChunks - subtrees * subtreeChunks) / 8;
+
+            // When the input is a whole number of chunks that splits into units with nothing
+            // left over, the workers hash all of it and the last unit's CV is deferred (as
+            // FinishAlignedSubtree does for Update) instead of holding back the final chunk,
+            // which used to leave up to 15 chunks to the caller's serial path.
+            bool deferLast = false;
+            if (input.Length % chunkLen == 0)
+            {
+                int allChunks = input.Length / chunkLen;
+                int fullSubtrees = allChunks / subtreeChunks;
+                int rest = allChunks - fullSubtrees * subtreeChunks;
+                if ((rest & 7) == 0)
+                {
+                    subtrees = fullSubtrees;
+                    tailBatches = rest / 8;
+                    deferLast = true;
+                }
+            }
+
             int items = subtrees + tailBatches;
 
             if (subtrees < 1 || items < 2)
@@ -1896,7 +1915,7 @@ internal static class Blake3Core
                         return;
                     }
 
-                    UpdateWithJoinCore(input, subtreeChunks, subtrees, tailBatches, items);
+                    UpdateWithJoinCore(input, subtreeChunks, subtrees, tailBatches, items, deferLast);
                 }
                 finally
                 {
@@ -1906,7 +1925,7 @@ internal static class Blake3Core
                 return;
             }
 
-            UpdateWithJoinCore(input, subtreeChunks, subtrees, tailBatches, items);
+            UpdateWithJoinCore(input, subtreeChunks, subtrees, tailBatches, items, deferLast);
         }
 
         [SkipLocalsInit]
@@ -2032,7 +2051,7 @@ internal static class Blake3Core
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private unsafe void UpdateWithJoinCore(ReadOnlySpan<byte> input,
-            int subtreeChunks, int subtrees, int tailBatches, int items)
+            int subtreeChunks, int subtrees, int tailBatches, int items, bool deferLast)
         {
             const int chunkLen = Blake3Constants.ChunkLen;
             int shift = subtreeChunks == 64 ? 6 : 4;
@@ -2064,18 +2083,30 @@ internal static class Blake3Core
                 Span<uint> tempCv = stackalloc uint[8];
 
                 // Merge subtree CVs (units of subtreeChunks chunks; see AddChunkCv).
-                for (int i = 0; i < subtrees; i++)
+                int mergedSubtrees = deferLast && tailBatches == 0 ? subtrees - 1 : subtrees;
+                for (int i = 0; i < mergedSubtrees; i++)
                 {
                     cvBuffer.AsSpan(i * 8, 8).CopyTo(tempCv);
                     AddChunkCv(tempCv, ((startCounter - _chunkBase) >> shift) + (ulong)i + 1);
                 }
 
+                if (mergedSubtrees != subtrees)
+                {
+                    DeferSubtreeCv(cvBuffer.AsSpan(mergedSubtrees * 8, 8), shift);
+                }
+
                 // Merge tail batch chunk CVs (units of 1 chunk).
                 ulong tailStart = startCounter - _chunkBase + (ulong)(subtrees * subtreeChunks);
-                for (int j = 0; j < tailBatches * 8; j++)
+                int mergedTail = deferLast && tailBatches > 0 ? tailBatches * 8 - 1 : tailBatches * 8;
+                for (int j = 0; j < mergedTail; j++)
                 {
                     cvBuffer.AsSpan(subtrees * 8 + j * 8, 8).CopyTo(tempCv);
                     AddChunkCv(tempCv, tailStart + (ulong)j + 1);
+                }
+
+                if (mergedTail != tailBatches * 8)
+                {
+                    DeferChunkCv(cvBuffer.AsSpan(subtrees * 8 + mergedTail * 8, 8));
                 }
             }
             finally
@@ -2087,7 +2118,8 @@ internal static class Blake3Core
             _chunkState = new ChunkState(KeySpan, startCounter + (ulong)consumedChunks, _flags);
 
             // Remaining < 8 full chunks plus the reserved final chunk; Update handles it.
-            Update(input.Slice(consumedChunks * chunkLen));
+            // Nothing remains when the last unit was deferred.
+            if (!deferLast) Update(input.Slice(consumedChunks * chunkLen));
         }
 
         /// <summary>
